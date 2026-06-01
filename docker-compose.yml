@@ -1,0 +1,23 @@
+services:
+  homelab-status:
+    image: ghcr.io/mark0025/homelab-status:latest
+    container_name: homelab-status
+    restart: unless-stopped
+    ports:
+      - "8800:8800"
+    environment:
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PERSONAL_ACCESS_TOKEN}
+      - STATUS_DB_PATH=/data/status.db
+      - MDOPS_DB_PATH=/data/mdops-mac.db
+    volumes:
+      - homelab_status_data:/data
+      - /home/mark/00Myhomelab/MDDPY-MAC-GLOBAL/data-mac/mdops-mac.db:/data/mdops-mac.db:ro
+    networks:
+      - nginx-network
+
+volumes:
+  homelab_status_data:
+
+networks:
+  nginx-network:
+    external: true

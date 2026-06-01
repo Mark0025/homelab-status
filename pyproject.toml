@@ -1,0 +1,23 @@
+[project]
+name = "homelab-status"
+version = "0.1.0"
+description = "Homelab endpoint health checker with verbose project understanding"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "loguru>=0.7.2",
+    "rich>=13.7.0",
+    "typer>=0.12.0",
+    "anyio>=4.4.0",
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "plotly>=5.22.0",
+    "pandas>=2.2.0",
+]
+
+[project.scripts]
+homelab-status = "homelab_status.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
