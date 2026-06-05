@@ -85,6 +85,11 @@ class ProjectProfile(BaseModel):
     has_tests: bool = False
     has_ci: bool = False
 
+    # Revenue readiness
+    payment_provider: str = ""   # 'stripe' | 'polar' | 'none'
+    has_pricing_ui: bool = False  # pricing route/component exists in repo
+    has_payment_webhook: bool = False  # webhook route for stripe/polar exists
+
     profiled_at: str = ""
 
 
@@ -262,6 +267,10 @@ def _init_intel_tables() -> None:
             has_docker           INTEGER DEFAULT 0,
             has_tests            INTEGER DEFAULT 0,
             has_ci               INTEGER DEFAULT 0,
+            -- Revenue readiness
+            payment_provider     TEXT DEFAULT '',
+            has_pricing_ui       INTEGER DEFAULT 0,
+            has_payment_webhook  INTEGER DEFAULT 0,
             profiled_at          TEXT NOT NULL,
             UNIQUE(repo, owner)
         );
@@ -278,6 +287,17 @@ def _init_intel_tables() -> None:
         ]:
             try:
                 conn.execute(f"ALTER TABLE gh_commits ADD COLUMN {col} {defn}")
+            except sqlite3.OperationalError:
+                pass  # already exists
+
+        # Idempotent column additions for project_profiles (revenue readiness)
+        for col, defn in [
+            ("payment_provider",    "TEXT DEFAULT ''"),
+            ("has_pricing_ui",      "INTEGER DEFAULT 0"),
+            ("has_payment_webhook", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE project_profiles ADD COLUMN {col} {defn}")
             except sqlite3.OperationalError:
                 pass  # already exists
 
@@ -592,6 +612,7 @@ async def profile_repo(
     # ── 2. File content fetches (parallel) ───────────────────────────────────
     readme_task      = asyncio.create_task(_fetch_file_content(client, owner, repo, "README.md"))
     claude_md_task   = asyncio.create_task(_fetch_file_content(client, owner, repo, "CLAUDE.md"))
+    pkg_json_task    = asyncio.create_task(_fetch_file_content(client, owner, repo, "package.json"))
     dockerfile_task  = asyncio.create_task(_path_exists(client, owner, repo, "Dockerfile"))
     ci_task          = asyncio.create_task(_path_exists(client, owner, repo, ".github/workflows"))
 
@@ -604,13 +625,44 @@ async def profile_repo(
         return_exceptions=True,
     )
 
-    readme_raw, claude_md_raw, has_docker, has_ci, test_results = await asyncio.gather(
-        readme_task, claude_md_task, dockerfile_task, ci_task, test_tasks,
+    # Revenue readiness: pricing UI and webhook routes
+    payment_tasks = asyncio.gather(
+        _path_exists(client, owner, repo, "app/api/webhooks/stripe"),
+        _path_exists(client, owner, repo, "app/api/webhooks/polar"),
+        _path_exists(client, owner, repo, "app/api/stripe/webhook"),
+        _path_exists(client, owner, repo, "src/app/api/webhooks/polar"),
+        _path_exists(client, owner, repo, "src/app/api/webhooks/stripe"),
+        _path_exists(client, owner, repo, "components/pricing"),
+        _path_exists(client, owner, repo, "app/(marketing)/pricing"),
+        _path_exists(client, owner, repo, "app/pricing"),
+        return_exceptions=True,
+    )
+
+    readme_raw, claude_md_raw, pkg_json_raw, has_docker, has_ci, test_results, payment_results = await asyncio.gather(
+        readme_task, claude_md_task, pkg_json_task, dockerfile_task, ci_task, test_tasks, payment_tasks,
     )
 
     readme_exists = readme_raw is not None
     claude_md_exists = claude_md_raw is not None
     has_tests = any(bool(r) for r in (test_results if isinstance(test_results, tuple | list) else []))
+
+    # Revenue readiness detection
+    payment_flags = payment_results if isinstance(payment_results, (tuple, list)) else []
+    # First 5 results = webhook routes, last 3 = pricing UI paths
+    has_payment_webhook = any(bool(r) for r in payment_flags[:5])
+    has_pricing_ui = any(bool(r) for r in payment_flags[5:])
+
+    payment_provider = "none"
+    if pkg_json_raw:
+        try:
+            pkg = json.loads(pkg_json_raw)
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if "stripe" in deps or "@stripe/stripe-js" in deps or "stripe-event-types" in deps:
+                payment_provider = "stripe"
+            elif "@polar-sh/sdk" in deps or "polar" in deps:
+                payment_provider = "polar"
+        except Exception:
+            pass
 
     readme_text = readme_raw or ""
     purpose, what_it_does_not_do = _extract_readme_sections(readme_text)
@@ -688,6 +740,9 @@ async def profile_repo(
         "has_docker": int(bool(has_docker)),
         "has_tests": int(bool(has_tests)),
         "has_ci": int(bool(has_ci)),
+        "payment_provider": payment_provider,
+        "has_pricing_ui": int(has_pricing_ui),
+        "has_payment_webhook": int(has_payment_webhook),
         "profiled_at": ts,
     }
 
@@ -702,14 +757,16 @@ def _upsert_profile(profile: dict) -> None:
                 primary_agent, claude_model, cursor_used, coderabbit_used, other_agents,
                 open_issues, total_commits, total_prs, fix_commit_ratio, avg_pr_days,
                 last_active, readme_summary, claude_md_exists, readme_exists,
-                is_active, is_fork, has_docker, has_tests, has_ci, profiled_at)
+                is_active, is_fork, has_docker, has_tests, has_ci,
+                payment_provider, has_pricing_ui, has_payment_webhook, profiled_at)
                VALUES
                (:repo,:owner,:display_name,:description,:purpose,:what_it_does_not_do,
                 :tech_stack,:container_name,:docker_networks,:connects_to,:public_url,
                 :primary_agent,:claude_model,:cursor_used,:coderabbit_used,:other_agents,
                 :open_issues,:total_commits,:total_prs,:fix_commit_ratio,:avg_pr_days,
                 :last_active,:readme_summary,:claude_md_exists,:readme_exists,
-                :is_active,:is_fork,:has_docker,:has_tests,:has_ci,:profiled_at)
+                :is_active,:is_fork,:has_docker,:has_tests,:has_ci,
+                :payment_provider,:has_pricing_ui,:has_payment_webhook,:profiled_at)
                ON CONFLICT(repo, owner) DO UPDATE SET
                  display_name=excluded.display_name,
                  description=excluded.description,
@@ -739,6 +796,9 @@ def _upsert_profile(profile: dict) -> None:
                  has_docker=excluded.has_docker,
                  has_tests=excluded.has_tests,
                  has_ci=excluded.has_ci,
+                 payment_provider=excluded.payment_provider,
+                 has_pricing_ui=excluded.has_pricing_ui,
+                 has_payment_webhook=excluded.has_payment_webhook,
                  profiled_at=excluded.profiled_at""",
             profile,
         )
@@ -835,7 +895,8 @@ def _deserialise_profile(row: sqlite3.Row | dict) -> dict:
             d[field] = []
     for field in ("cursor_used", "coderabbit_used", "claude_md_exists",
                   "readme_exists", "is_active", "is_fork",
-                  "has_docker", "has_tests", "has_ci"):
+                  "has_docker", "has_tests", "has_ci",
+                  "has_pricing_ui", "has_payment_webhook"):
         if field in d:
             d[field] = bool(d[field])
     return d
