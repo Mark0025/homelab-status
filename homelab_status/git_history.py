@@ -17,12 +17,19 @@ from .db import _conn, init_db
 
 # ── Config ─────────────────────────────────────────────────────────────────
 
+def _token_from_gh_cli() -> str:
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
 GITHUB_TOKEN = (
     os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     or os.environ.get("GH_TOKEN")
-    or subprocess.run(
-        ["gh", "auth", "token"], capture_output=True, text=True
-    ).stdout.strip()
+    or _token_from_gh_cli()
 )
 
 GITHUB_HEADERS = {
