@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Build
+dist/
+
+# Database / runtime state
+*.db
+*.db-wal
+*.db-shm
+
+# Env
+.env
+.env.local
+
+# macOS
+.DS_Store
