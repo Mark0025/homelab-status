@@ -462,3 +462,184 @@ def save_answer(question_id: int, answer_text: str) -> bool:
             (answer_text, ts, question_id),
         )
     return True
+
+
+def update_question(question_id: int, question_text: str) -> bool:
+    """Edit a question's text and mark it as human-edited so enricher won't overwrite it."""
+    init_db()
+    ts = datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE journey_questions SET question_text=?, is_edited=1, edited_at=? WHERE id=?",
+            (question_text, ts, question_id),
+        )
+    return True
+
+
+def get_personas(episode_id: int) -> list[str]:
+    """Return all persona names that have questions for this episode."""
+    init_db()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT persona FROM journey_questions WHERE episode_id=? ORDER BY persona",
+            (episode_id,),
+        ).fetchall()
+    return [r["persona"] for r in rows]
+
+
+def clone_questions_for_persona(episode_id: int, new_persona: str) -> int:
+    """
+    Copy the 'default' questions for an episode under a new persona name.
+    Copies start as is_edited=0 — customize them from there.
+    Returns count of questions cloned, 0 if persona already exists.
+    """
+    init_db()
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM journey_questions WHERE episode_id=? AND persona=?",
+            (episode_id, new_persona),
+        ).fetchone()[0]
+        if existing:
+            return 0
+
+        rows = conn.execute(
+            """SELECT seq, question_text, question_type, data_source, data_ref
+               FROM journey_questions WHERE episode_id=? AND persona='default' ORDER BY seq""",
+            (episode_id,),
+        ).fetchall()
+
+        conn.executemany(
+            """INSERT INTO journey_questions
+               (episode_id, seq, question_text, question_type, data_source, data_ref, persona, is_edited)
+               VALUES (?,?,?,?,?,?,?,0)""",
+            [(episode_id, r["seq"], r["question_text"], r["question_type"],
+              r["data_source"], r["data_ref"], new_persona) for r in rows],
+        )
+    return len(rows)
+
+
+def get_episode_questions(episode_id: int, persona: str = "default") -> list[dict]:
+    """Return questions for an episode, filtered by persona."""
+    init_db()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM journey_questions WHERE episode_id=? AND persona=? ORDER BY seq",
+            (episode_id, persona),
+        ).fetchall()
+        if not rows and persona != "default":
+            rows = conn.execute(
+                "SELECT * FROM journey_questions WHERE episode_id=? AND persona='default' ORDER BY seq",
+                (episode_id,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def scan_repo_deps(repo_name: str) -> dict:
+    """
+    Scan local clone of a repo for npm/pyproject/requirements package files.
+    Returns {npm:[...], pyproject:[...], requirements:[...], has_uv: bool}
+    """
+    import json as _json
+    import re
+
+    search_roots = [
+        Path.home(),                                # repos living directly in ~
+        Path.home() / "dev",                        # ~/dev/homelab-status etc.
+        Path.home() / "Desktop" / "git-projects",
+        Path.home() / "Desktop" / "pete",
+        Path.home() / "WebstormProjects",
+        Path.home() / "Desktop",
+    ]
+
+    repo_path = None
+    for root in search_roots:
+        p = root / repo_name
+        if p.is_dir() and (p / ".git").is_dir():
+            repo_path = p
+            break
+
+    if not repo_path:
+        return {}
+
+    result: dict = {}
+
+    pkg_json = repo_path / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = _json.loads(pkg_json.read_text())
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            result["npm"] = sorted(deps.keys())[:30]
+        except Exception:
+            result["npm"] = []
+
+    pyproject = repo_path / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            text = pyproject.read_text()
+            pkgs: list[str] = []
+            in_deps = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                # enter a dependencies list section
+                if re.match(r'^(dependencies|dev|extras)\s*=\s*\[', stripped):
+                    in_deps = True
+                    continue
+                if in_deps:
+                    if stripped.startswith(']'):
+                        in_deps = False
+                        continue
+                    # extract bare package name from quoted dep string
+                    m = re.match(r'''["']([a-zA-Z][a-zA-Z0-9_-]+)''', stripped)
+                    if m:
+                        pkgs.append(m.group(1).lower().replace('-', '_'))
+            result["pyproject"] = sorted(set(pkgs))[:30]
+        except Exception:
+            result["pyproject"] = []
+
+    req = repo_path / "requirements.txt"
+    if req.exists():
+        try:
+            lines = req.read_text().splitlines()
+            pkgs = [re.split(r'[>=<!\[#]', l.strip())[0].strip() for l in lines if l.strip() and not l.startswith('#')]
+            result["requirements"] = [p for p in pkgs if p][:30]
+        except Exception:
+            result["requirements"] = []
+
+    result["has_uv"] = (repo_path / "uv.lock").exists()
+    return result
+
+
+def refresh_all_deps() -> dict:
+    """Scan all locally cloned repos and persist their deps_snapshot."""
+    init_db()
+    import json as _json
+    updated = 0
+    with _conn() as conn:
+        repos = conn.execute("SELECT id, repo FROM journey_repos").fetchall()
+        for row in repos:
+            deps = scan_repo_deps(row["repo"])
+            if deps:
+                conn.execute(
+                    "UPDATE journey_repos SET deps_snapshot=? WHERE id=?",
+                    (_json.dumps(deps), row["id"]),
+                )
+                updated += 1
+    return {"updated": updated}
+
+
+def get_episode_deps(episode_id: int) -> dict:
+    """Return {repo, deps} for the repo attached to an episode. Falls back to live scan."""
+    import json as _json
+    init_db()
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT r.repo, r.deps_snapshot FROM journey_episodes e
+               JOIN journey_repos r ON r.id = e.repo_id WHERE e.id=?""",
+            (episode_id,),
+        ).fetchone()
+    if not row:
+        return {"repo": None, "deps": {}}
+    deps = _json.loads(row["deps_snapshot"]) if row["deps_snapshot"] else {}
+    if not deps:
+        deps = scan_repo_deps(row["repo"])
+    return {"repo": row["repo"], "deps": deps}

@@ -160,6 +160,23 @@ def init_db() -> None:
 
         -- Add columns if upgrading from older schema
         """)
+        # Idempotent column additions for journey tables
+        for col, defn in [
+            ("persona",     "TEXT NOT NULL DEFAULT 'default'"),   # interviewer persona
+            ("is_edited",   "INTEGER NOT NULL DEFAULT 0"),        # 1 = human-edited, survives re-enrichment
+            ("edited_at",   "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE journey_questions ADD COLUMN {col} {defn}")
+            except sqlite3.OperationalError:
+                pass
+        for col, defn in [
+            ("deps_snapshot", "TEXT"),  # JSON: {npm:[...], pyproject:[...], requirements:[...]}
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE journey_repos ADD COLUMN {col} {defn}")
+            except sqlite3.OperationalError:
+                pass
         # Idempotent column additions for upgrades
         for col, defn in [
             ("container_name", "TEXT NOT NULL DEFAULT ''"),
