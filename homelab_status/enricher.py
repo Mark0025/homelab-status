@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 from loguru import logger
 
 from .db import _conn, init_db
-from .mdops import search_docs, get_doc
+from .mdops import docs_for_repo, get_doc
 
 JOURNEY_JSON = Path(__file__).parent.parent / "data" / "journey_v1.json"
 PAI_LEARNINGS = Path.home() / ".claude" / "context" / "learnings"
@@ -39,17 +40,33 @@ _LOCAL_SEARCH_ROOTS = [
 ]
 
 # Doc filenames that signal vision/plan content (checked against filename, not full path)
+# Intentionally excludes bare "readme" — every repo has one; prefer substantive plan docs
 _PLAN_SIGNALS = re.compile(
     r"(plan|vision|roadmap|spec|mcv|goals?|strategy|claude|what.user.actually|"
-    r"what.we.built|whats.working|changelog|dev.man|readme|analysis|launch)",
+    r"what.we.built|whats.working|changelog|dev.man|analysis|launch|telos|todo)",
+    re.I,
+)
+
+# Honest user-intent docs — retrospective analyses of what was wanted vs what shipped
+_HIGH_SIGNAL = re.compile(
+    r"(what.user|what.we.built|strategic|vision|mcv|goals|reality|user.actually)",
     re.I,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+@lru_cache(maxsize=1)
 def _load_json() -> dict:
     with open(JOURNEY_JSON) as f:
         return json.load(f)
+
+
+def _buffered_start(active_start: str, days: int = 90) -> str:
+    """Return active_start minus `days` days as YYYY-MM-DD, for plans written before first push."""
+    try:
+        return (datetime.fromisoformat(active_start) - timedelta(days=days)).strftime("%Y-%m-%d")
+    except Exception:
+        return active_start
 
 
 def _commits_for_repo(timeline: list, org: str, repo: str) -> list[dict]:
@@ -131,6 +148,7 @@ def _find_repo_docs(repo: str, first_commit: str, last_commit: str) -> list[dict
 
     active_start = first_commit[:10] if first_commit else "2020-01-01"
     active_end = last_commit[:10] if last_commit else "2030-01-01"
+    buffered_start = _buffered_start(active_start)
 
     hits = []
     # Scan all .md files, prioritizing plan docs
@@ -150,13 +168,6 @@ def _find_repo_docs(repo: str, first_commit: str, last_commit: str) -> list[dict
         # Only include docs committed during the repo's active window
         if first_git_date > active_end:
             continue
-        # Allow a 90-day buffer before the repo's first commit (plans written before first push)
-        try:
-            from datetime import timedelta
-            start_dt = datetime.fromisoformat(active_start)
-            buffered_start = (start_dt - timedelta(days=90)).strftime("%Y-%m-%d")
-        except Exception:
-            buffered_start = active_start
         if first_git_date < buffered_start:
             continue
 
@@ -215,33 +226,41 @@ def _find_repo_docs(repo: str, first_commit: str, last_commit: str) -> list[dict
 
 def _find_mdops_docs(repo: str, first_commit: str = "", last_commit: str = "") -> list[dict]:
     """
-    Query the mdops DB for documents that mention this repo.
-    For docs that have a git_root and a local file, verifies the commit date falls
-    within [first_commit - 90d, last_commit] so we get docs written DURING the build.
+    Query the mdops DB for documents belonging to this repo.
 
-    Returns docs ranked: plan/vision docs first, then analysis docs.
+    Uses docs_for_repo() which matches on git_remotes LIKE %repo% — this correctly
+    finds ALL docs in a repo (not just ones whose *filename* contains the repo name).
+    E.g. AGOE/DEV_MAN/Plann.v.0.0.1.md is found even though "AGOE" isn't in the filename.
+
+    Returns docs ranked: DEV_MAN/plans/ > other plan-signal docs > rest.
     Each result: {id, title, filename, content_preview, is_plan_doc, first_git_date}
     """
     try:
-        results = search_docs(repo, limit=20)
+        results = docs_for_repo(repo)
     except Exception:
+        return []
+
+    if not results:
         return []
 
     active_start = first_commit[:10] if first_commit else ""
     active_end = last_commit[:10] if last_commit else ""
+    buf_start = _buffered_start(active_start) if active_start else ""
 
     hits = []
     for r in results:
-        filename = r.get("filename", "")
-        title = r.get("title", "")
+        filename = r.get("filename", "") or ""
+        title = r.get("title", "") or ""
         doc_id = r.get("id")
-        full_path_str = r.get("full_path", "")
-        git_root_str = r.get("git_root", "")
+        full_path_str = r.get("full_path", "") or ""
+        git_root_str = r.get("git_root", "") or ""
         if not doc_id:
             continue
-        is_plan = bool(_PLAN_SIGNALS.search(filename) or _PLAN_SIGNALS.search(title))
 
-        # Try to get real commit date via git if we have the paths
+        rel_path = r.get("relative_path", "") or ""
+        is_plan = bool(_PLAN_SIGNALS.search(rel_path) or _PLAN_SIGNALS.search(filename) or _PLAN_SIGNALS.search(title))
+
+        # Verify commit date via git log on the actual file
         first_git_date = None
         if full_path_str and git_root_str:
             fp = Path(full_path_str)
@@ -249,43 +268,83 @@ def _find_mdops_docs(repo: str, first_commit: str = "", last_commit: str = "") -
             if fp.exists() and gr.exists():
                 first_git_date = _git_first_commit_date(fp, gr)
 
-        # If we have date bounds and a verified date, filter to active window
-        if first_git_date and active_start and active_end:
-            try:
-                from datetime import timedelta
-                start_dt = datetime.fromisoformat(active_start)
-                buffered_start = (start_dt - timedelta(days=90)).strftime("%Y-%m-%d")
-            except Exception:
-                buffered_start = active_start
-            if first_git_date < buffered_start or first_git_date > active_end:
-                continue  # doc written outside the repo's active window — skip
+        # Filter: doc must have been written during the repo's active window
+        if first_git_date and buf_start and active_end:
+            if first_git_date < buf_start or first_git_date > active_end:
+                continue
 
-        # Pull full content for plan docs
+        # Pull content for plan docs (file content is read on demand from disk)
         content_preview = ""
-        if is_plan:
-            try:
-                full = get_doc(doc_id)
-                raw = full.get("content", "") or ""
-                lines = [
-                    l.strip() for l in raw.splitlines()
-                    if l.strip() and not l.startswith("#") and len(l.strip()) > 30
-                ]
-                content_preview = " ".join(lines)[:600]
-            except Exception:
-                pass
+        if is_plan and full_path_str:
+            fp = Path(full_path_str)
+            if fp.exists():
+                try:
+                    full = get_doc(doc_id)
+                    raw = full.get("content", "") or ""
+                    lines = [
+                        l.strip() for l in raw.splitlines()
+                        if l.strip() and not l.startswith("#") and len(l.strip()) > 30
+                    ]
+                    content_preview = " ".join(lines)[:600]
+                except Exception:
+                    pass
+
+        # Sort tier: DEV_MAN/plans/ (0) > other plan-signal (1) > rest (2)
+        if "DEV_MAN" in rel_path and "plan" in rel_path.lower():
+            tier = 0
+        elif is_plan:
+            tier = 1
+        else:
+            tier = 2
 
         hits.append({
             "id": doc_id,
             "title": title,
             "filename": filename,
+            "rel_path": rel_path,
             "content_preview": content_preview,
             "is_plan_doc": is_plan,
             "first_git_date": first_git_date,
+            "word_count": r.get("word_count", 0) or 0,
+            "tier": tier,
             "source": "mdops",
         })
 
-    hits.sort(key=lambda h: (0 if h["is_plan_doc"] else 1, h.get("first_git_date") or "z"))
+    # Sort: tier asc, then word_count desc (longest doc wins within tier), then date asc
+    hits.sort(key=lambda h: (h["tier"], -(h["word_count"]), h.get("first_git_date") or "z"))
     return hits
+
+
+def _select_best_plan_doc(
+    repo_docs: list[dict] | None,
+    mdops_docs: list[dict] | None,
+) -> tuple[dict | None, str | None]:
+    """
+    Pick the best plan/vision doc for Q4, returning (doc, source).
+    Prefers local repo docs over mdops; within local, prefers high-signal titles (latest first).
+    """
+    if repo_docs:
+        hs = [
+            d for d in repo_docs
+            if d["is_plan_doc"] and d.get("content_preview")
+            and _HIGH_SIGNAL.search(d.get("rel_path", "") + d.get("filename", ""))
+        ]
+        if hs:
+            return max(hs, key=lambda d: d.get("first_git_date", "")), "local"
+        candidates = [d for d in repo_docs if d["is_plan_doc"] and d.get("content_preview")]
+        if candidates:
+            return max(candidates, key=lambda d: len(d.get("content_preview", ""))), "local"
+
+    if mdops_docs:
+        # Prefer docs with content, but accept high-tier plan docs even without content
+        # (e.g. DEV_MAN/Plann.v.0.0.1.md tells us a plan existed even if file is gone)
+        doc = next((d for d in mdops_docs if d["is_plan_doc"] and d.get("content_preview")), None)
+        if not doc:
+            doc = next((d for d in mdops_docs if d["is_plan_doc"] and d.get("tier", 2) <= 1), None)
+        if doc:
+            return doc, "mdops"
+
+    return None, None
 
 
 def _pick_signal_commits(commits: list[dict]) -> dict:
@@ -453,63 +512,31 @@ def _build_specific_questions(
     }
     era_context = chapter_map.get(chapter, "")
 
-    # Try to use actual plan/vision docs — prefer git-verified local repo docs first,
-    # then fall back to mdops docs. Both are filtered to the repo's active window.
-    plan_doc = None
-    plan_source = None
-
-    if repo_docs:
-        # Prefer highest-signal vision docs: WHAT_USER, STRATEGIC, VISION
-        # These contain honest user-intent assessments, not just implementation plans
-        _HIGH_SIGNAL = re.compile(
-            r"(what.user|what.we.built|strategic|vision|mcv|goals|reality|user.actually)",
-            re.I,
-        )
-        # Among high-signal docs, prefer the latest (most recent first_git_date)
-        # because later docs tend to be more honest retrospectives of what actually happened
-        hs_candidates = [
-            d for d in repo_docs
-            if d["is_plan_doc"] and d.get("content_preview")
-            and _HIGH_SIGNAL.search(d.get("rel_path", "") + d.get("filename", ""))
-        ]
-        high_signal = max(hs_candidates, key=lambda d: d.get("first_git_date", "")) if hs_candidates else None
-        # Fall back to any plan doc with good content — pick the one with the most prose
-        # (longer content_preview = more explanation, less just checklists)
-        plan_candidates = [d for d in repo_docs if d["is_plan_doc"] and d.get("content_preview")]
-        best_plan = max(plan_candidates, key=lambda d: len(d.get("content_preview", ""))) if plan_candidates else None
-        local_plan = high_signal or best_plan
-        if local_plan:
-            plan_doc = local_plan
-            plan_source = "local"
-
-    if not plan_doc and mdops_docs:
-        mdops_plan = next((d for d in mdops_docs if d["is_plan_doc"] and d.get("content_preview")), None)
-        if mdops_plan:
-            plan_doc = mdops_plan
-            plan_source = "mdops"
+    plan_doc, plan_source = _select_best_plan_doc(repo_docs, mdops_docs)
 
     if plan_doc:
-        preview = plan_doc["content_preview"][:400]
-        if plan_source == "local":
-            doc_name = plan_doc["filename"]
-            date_ctx = f" (committed {plan_doc['first_git_date']})" if plan_doc.get("first_git_date") else ""
+        preview = plan_doc.get("content_preview", "")[:400]
+        doc_name = plan_doc.get("filename", plan_doc.get("title", ""))
+        date_ctx = f" (committed {plan_doc['first_git_date']})" if plan_doc.get("first_git_date") else ""
+
+        if preview:
+            # We have actual content to quote
             text = (
-                f"There's a document in the repo called \"{doc_name}\"{date_ctx}. "
+                f"There's a document called \"{doc_name}\"{date_ctx} from the {repo} repo. "
                 f"It says: \"{preview}\". "
-                f"That was written while you were actively building {repo}. "
+                f"That was written while you were actively building this. "
                 f"How much of that plan actually shipped? Where did reality diverge?"
             )
-            data_ref = plan_doc["rel_path"]
         else:
-            title = plan_doc.get("title", plan_doc.get("filename", ""))
-            date_ctx = f" (written {plan_doc['first_git_date']})" if plan_doc.get("first_git_date") else ""
+            # File is gone (stale mdops path) but we know the doc existed — use the name as evidence
+            rel = plan_doc.get("rel_path", "") or plan_doc.get("filename", doc_name)
             text = (
-                f"I found a document called \"{title}\"{date_ctx} that you wrote about {repo}. "
-                f"It says: \"{preview}\". "
-                f"Reading that now — how much of that vision actually shipped? "
-                f"Where did reality diverge from the plan?"
+                f"You wrote a planning document called \"{doc_name}\" in {repo} ({rel}){date_ctx}. "
+                f"I can see it existed but the file isn't on disk anymore. "
+                f"What was in that document — what were you planning, and did any of it ship?"
             )
-            data_ref = str(plan_doc.get("id", ""))
+
+        data_ref = plan_doc.get("rel_path", "") or str(plan_doc.get("id", ""))
         qs.append({"seq": 4, "question_type": "vision", "question_text": text,
                    "data_source": f"repo_doc_{plan_source}", "data_ref": data_ref})
     else:
@@ -553,7 +580,56 @@ def _build_specific_questions(
     return qs
 
 
-# ── main enrichment function ──────────────────────────────────────────────────
+_EPISODE_QUERY = """
+    SELECT e.id as episode_id, e.repo_id,
+           r.org, r.repo, r.total_commits, r.is_fork,
+           r.description, r.readme_preview, r.language, r.chapter,
+           r.first_commit_date, r.first_commit_msg
+    FROM journey_episodes e
+    JOIN journey_repos r ON r.id = e.repo_id
+"""
+
+
+def _enrich_row(row: dict, timeline: list) -> tuple[list[dict], dict]:
+    """
+    Run the full enrichment pipeline for one row and write questions to DB.
+    Returns (questions, stats) where stats has learnings/docs/commits counts.
+    """
+    repo = row["repo"]
+    org = row["org"]
+    first_commit = row.get("first_commit_date", "") or ""
+    commits = _commits_for_repo(timeline, org, repo)
+    last_commit = commits[0].get("date", "") if commits else ""
+
+    signals = _pick_signal_commits(commits)
+    learnings = _find_pai_learnings(repo)
+    repo_docs = _find_repo_docs(repo, first_commit, last_commit)
+    mdops_docs = _find_mdops_docs(repo, first_commit, last_commit)
+    questions = _build_specific_questions(repo, org, signals, learnings, row, mdops_docs, repo_docs)
+
+    episode_id = row["episode_id"]
+    with _conn() as conn:
+        conn.execute("DELETE FROM journey_questions WHERE episode_id=?", (episode_id,))
+        conn.executemany(
+            """INSERT INTO journey_questions
+               (episode_id, seq, question_text, question_type, data_source, data_ref)
+               VALUES (?,?,?,?,?,?)""",
+            [(episode_id, q["seq"], q["question_text"], q["question_type"],
+              q["data_source"], q["data_ref"]) for q in questions],
+        )
+
+    stats = {
+        "learnings_found": len(learnings),
+        "repo_docs_found": len(repo_docs),
+        "repo_plan_docs_found": sum(1 for d in repo_docs if d["is_plan_doc"]),
+        "mdops_docs_found": len(mdops_docs),
+        "plan_docs_found": sum(1 for d in mdops_docs if d["is_plan_doc"]),
+        "commits_found": len(commits),
+    }
+    return questions, stats
+
+
+# ── public enrichment functions ───────────────────────────────────────────────
 
 def enrich_all_episodes(limit: int | None = None) -> dict:
     """
@@ -562,60 +638,21 @@ def enrich_all_episodes(limit: int | None = None) -> dict:
     """
     init_db()
     logger.info("Loading journey_v1.json …")
-    data = _load_json()
-    timeline = data.get("timeline", [])
-
+    timeline = _load_json().get("timeline", [])
     logger.info(f"Scanning PAI learnings at {PAI_LEARNINGS} …")
 
     with _conn() as conn:
-        # Get all repo episodes (exclude chapter overview episodes which have no repo_id)
-        rows = conn.execute("""
-            SELECT e.id as episode_id, e.repo_id,
-                   r.org, r.repo, r.total_commits, r.is_fork,
-                   r.description, r.readme_preview, r.language, r.chapter,
-                   r.first_commit_date, r.first_commit_msg
-            FROM journey_episodes e
-            JOIN journey_repos r ON r.id = e.repo_id
-            ORDER BY r.first_commit_date
-        """).fetchall()
+        rows = conn.execute(_EPISODE_QUERY + " ORDER BY r.first_commit_date").fetchall()
 
     rows = [dict(r) for r in rows]
     if limit:
         rows = rows[:limit]
 
     enriched = skipped = errors = 0
-    ts = datetime.now().isoformat()
-
     for row in rows:
         try:
-            episode_id = row["episode_id"]
-            org = row["org"]
-            repo = row["repo"]
-            first_commit = row.get("first_commit_date", "") or ""
-            # derive last commit from commits list
-            commits = _commits_for_repo(timeline, org, repo)
-            last_commit = commits[0].get("date", "") if commits else ""
-
-            signals = _pick_signal_commits(commits)
-            learnings = _find_pai_learnings(repo)
-            repo_docs = _find_repo_docs(repo, first_commit, last_commit)
-            mdops_docs = _find_mdops_docs(repo, first_commit, last_commit)
-            questions = _build_specific_questions(
-                repo, org, signals, learnings, row, mdops_docs, repo_docs
-            )
-
-            with _conn() as conn:
-                # Replace existing questions for this episode
-                conn.execute("DELETE FROM journey_questions WHERE episode_id=?", (episode_id,))
-                conn.executemany(
-                    """INSERT INTO journey_questions
-                       (episode_id, seq, question_text, question_type, data_source, data_ref)
-                       VALUES (?,?,?,?,?,?)""",
-                    [(episode_id, q["seq"], q["question_text"], q["question_type"],
-                      q["data_source"], q["data_ref"]) for q in questions],
-                )
+            _enrich_row(row, timeline)
             enriched += 1
-
         except Exception as e:
             logger.error(f"Error enriching episode {row.get('episode_id')} ({row.get('repo')}): {e}")
             errors += 1
@@ -627,54 +664,17 @@ def enrich_all_episodes(limit: int | None = None) -> dict:
 def enrich_one_episode(episode_id: int) -> dict:
     """Enrich a single episode — called from the UI when you click 'Deep Dive'."""
     init_db()
-    data = _load_json()
-    timeline = data.get("timeline", [])
+    timeline = _load_json().get("timeline", [])
 
     with _conn() as conn:
-        row = conn.execute("""
-            SELECT e.id as episode_id, e.repo_id,
-                   r.org, r.repo, r.total_commits, r.is_fork,
-                   r.description, r.readme_preview, r.language, r.chapter,
-                   r.first_commit_date, r.first_commit_msg
-            FROM journey_episodes e
-            JOIN journey_repos r ON r.id = e.repo_id
-            WHERE e.id = ?
-        """, (episode_id,)).fetchone()
+        row = conn.execute(
+            _EPISODE_QUERY + " WHERE e.id = ?", (episode_id,)
+        ).fetchone()
 
     if not row:
         return {"error": "episode not found"}
 
     row = dict(row)
-    first_commit = row.get("first_commit_date", "") or ""
-    commits = _commits_for_repo(timeline, row["org"], row["repo"])
-    last_commit = commits[0].get("date", "") if commits else ""
+    questions, stats = _enrich_row(row, timeline)
 
-    signals = _pick_signal_commits(commits)
-    learnings = _find_pai_learnings(row["repo"])
-    repo_docs = _find_repo_docs(row["repo"], first_commit, last_commit)
-    mdops_docs = _find_mdops_docs(row["repo"], first_commit, last_commit)
-    questions = _build_specific_questions(
-        row["repo"], row["org"], signals, learnings, row, mdops_docs, repo_docs
-    )
-
-    with _conn() as conn:
-        conn.execute("DELETE FROM journey_questions WHERE episode_id=?", (episode_id,))
-        conn.executemany(
-            """INSERT INTO journey_questions
-               (episode_id, seq, question_text, question_type, data_source, data_ref)
-               VALUES (?,?,?,?,?,?)""",
-            [(episode_id, q["seq"], q["question_text"], q["question_type"],
-              q["data_source"], q["data_ref"]) for q in questions],
-        )
-
-    return {
-        "episode_id": episode_id,
-        "repo": row["repo"],
-        "questions": questions,
-        "learnings_found": len(learnings),
-        "repo_docs_found": len(repo_docs),
-        "repo_plan_docs_found": sum(1 for d in repo_docs if d["is_plan_doc"]),
-        "mdops_docs_found": len(mdops_docs),
-        "plan_docs_found": sum(1 for d in mdops_docs if d["is_plan_doc"]),
-        "commits_found": len(commits),
-    }
+    return {"episode_id": episode_id, "repo": row["repo"], "questions": questions, **stats}
