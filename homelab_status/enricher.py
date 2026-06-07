@@ -25,7 +25,7 @@ from pathlib import Path
 from loguru import logger
 
 from .db import _conn, init_db
-from .mdops import search_docs, get_doc
+from .mdops import docs_for_repo, get_doc
 
 JOURNEY_JSON = Path(__file__).parent.parent / "data" / "journey_v1.json"
 PAI_LEARNINGS = Path.home() / ".claude" / "context" / "learnings"
@@ -40,9 +40,10 @@ _LOCAL_SEARCH_ROOTS = [
 ]
 
 # Doc filenames that signal vision/plan content (checked against filename, not full path)
+# Intentionally excludes bare "readme" — every repo has one; prefer substantive plan docs
 _PLAN_SIGNALS = re.compile(
     r"(plan|vision|roadmap|spec|mcv|goals?|strategy|claude|what.user.actually|"
-    r"what.we.built|whats.working|changelog|dev.man|readme|analysis|launch)",
+    r"what.we.built|whats.working|changelog|dev.man|analysis|launch|telos|todo)",
     re.I,
 )
 
@@ -225,16 +226,21 @@ def _find_repo_docs(repo: str, first_commit: str, last_commit: str) -> list[dict
 
 def _find_mdops_docs(repo: str, first_commit: str = "", last_commit: str = "") -> list[dict]:
     """
-    Query the mdops DB for documents that mention this repo.
-    For docs that have a git_root and a local file, verifies the commit date falls
-    within [first_commit - 90d, last_commit] so we get docs written DURING the build.
+    Query the mdops DB for documents belonging to this repo.
 
-    Returns docs ranked: plan/vision docs first, then analysis docs.
+    Uses docs_for_repo() which matches on git_remotes LIKE %repo% — this correctly
+    finds ALL docs in a repo (not just ones whose *filename* contains the repo name).
+    E.g. AGOE/DEV_MAN/Plann.v.0.0.1.md is found even though "AGOE" isn't in the filename.
+
+    Returns docs ranked: DEV_MAN/plans/ > other plan-signal docs > rest.
     Each result: {id, title, filename, content_preview, is_plan_doc, first_git_date}
     """
     try:
-        results = search_docs(repo, limit=20)
+        results = docs_for_repo(repo)
     except Exception:
+        return []
+
+    if not results:
         return []
 
     active_start = first_commit[:10] if first_commit else ""
@@ -243,16 +249,18 @@ def _find_mdops_docs(repo: str, first_commit: str = "", last_commit: str = "") -
 
     hits = []
     for r in results:
-        filename = r.get("filename", "")
-        title = r.get("title", "")
+        filename = r.get("filename", "") or ""
+        title = r.get("title", "") or ""
         doc_id = r.get("id")
-        full_path_str = r.get("full_path", "")
-        git_root_str = r.get("git_root", "")
+        full_path_str = r.get("full_path", "") or ""
+        git_root_str = r.get("git_root", "") or ""
         if not doc_id:
             continue
-        is_plan = bool(_PLAN_SIGNALS.search(filename) or _PLAN_SIGNALS.search(title))
 
-        # Try to get real commit date via git if we have the paths
+        rel_path = r.get("relative_path", "") or ""
+        is_plan = bool(_PLAN_SIGNALS.search(rel_path) or _PLAN_SIGNALS.search(filename) or _PLAN_SIGNALS.search(title))
+
+        # Verify commit date via git log on the actual file
         first_git_date = None
         if full_path_str and git_root_str:
             fp = Path(full_path_str)
@@ -260,36 +268,50 @@ def _find_mdops_docs(repo: str, first_commit: str = "", last_commit: str = "") -
             if fp.exists() and gr.exists():
                 first_git_date = _git_first_commit_date(fp, gr)
 
-        # If we have date bounds and a verified date, filter to active window
+        # Filter: doc must have been written during the repo's active window
         if first_git_date and buf_start and active_end:
             if first_git_date < buf_start or first_git_date > active_end:
-                continue  # doc written outside the repo's active window — skip
+                continue
 
-        # Pull full content for plan docs
+        # Pull content for plan docs (file content is read on demand from disk)
         content_preview = ""
-        if is_plan:
-            try:
-                full = get_doc(doc_id)
-                raw = full.get("content", "") or ""
-                lines = [
-                    l.strip() for l in raw.splitlines()
-                    if l.strip() and not l.startswith("#") and len(l.strip()) > 30
-                ]
-                content_preview = " ".join(lines)[:600]
-            except Exception:
-                pass
+        if is_plan and full_path_str:
+            fp = Path(full_path_str)
+            if fp.exists():
+                try:
+                    full = get_doc(doc_id)
+                    raw = full.get("content", "") or ""
+                    lines = [
+                        l.strip() for l in raw.splitlines()
+                        if l.strip() and not l.startswith("#") and len(l.strip()) > 30
+                    ]
+                    content_preview = " ".join(lines)[:600]
+                except Exception:
+                    pass
+
+        # Sort tier: DEV_MAN/plans/ (0) > other plan-signal (1) > rest (2)
+        if "DEV_MAN" in rel_path and "plan" in rel_path.lower():
+            tier = 0
+        elif is_plan:
+            tier = 1
+        else:
+            tier = 2
 
         hits.append({
             "id": doc_id,
             "title": title,
             "filename": filename,
+            "rel_path": rel_path,
             "content_preview": content_preview,
             "is_plan_doc": is_plan,
             "first_git_date": first_git_date,
+            "word_count": r.get("word_count", 0) or 0,
+            "tier": tier,
             "source": "mdops",
         })
 
-    hits.sort(key=lambda h: (0 if h["is_plan_doc"] else 1, h.get("first_git_date") or "z"))
+    # Sort: tier asc, then word_count desc (longest doc wins within tier), then date asc
+    hits.sort(key=lambda h: (h["tier"], -(h["word_count"]), h.get("first_git_date") or "z"))
     return hits
 
 
@@ -314,7 +336,11 @@ def _select_best_plan_doc(
             return max(candidates, key=lambda d: len(d.get("content_preview", ""))), "local"
 
     if mdops_docs:
+        # Prefer docs with content, but accept high-tier plan docs even without content
+        # (e.g. DEV_MAN/Plann.v.0.0.1.md tells us a plan existed even if file is gone)
         doc = next((d for d in mdops_docs if d["is_plan_doc"] and d.get("content_preview")), None)
+        if not doc:
+            doc = next((d for d in mdops_docs if d["is_plan_doc"] and d.get("tier", 2) <= 1), None)
         if doc:
             return doc, "mdops"
 
@@ -489,27 +515,28 @@ def _build_specific_questions(
     plan_doc, plan_source = _select_best_plan_doc(repo_docs, mdops_docs)
 
     if plan_doc:
-        preview = plan_doc["content_preview"][:400]
-        if plan_source == "local":
-            doc_name = plan_doc["filename"]
-            date_ctx = f" (committed {plan_doc['first_git_date']})" if plan_doc.get("first_git_date") else ""
+        preview = plan_doc.get("content_preview", "")[:400]
+        doc_name = plan_doc.get("filename", plan_doc.get("title", ""))
+        date_ctx = f" (committed {plan_doc['first_git_date']})" if plan_doc.get("first_git_date") else ""
+
+        if preview:
+            # We have actual content to quote
             text = (
-                f"There's a document in the repo called \"{doc_name}\"{date_ctx}. "
+                f"There's a document called \"{doc_name}\"{date_ctx} from the {repo} repo. "
                 f"It says: \"{preview}\". "
-                f"That was written while you were actively building {repo}. "
+                f"That was written while you were actively building this. "
                 f"How much of that plan actually shipped? Where did reality diverge?"
             )
-            data_ref = plan_doc["rel_path"]
         else:
-            title = plan_doc.get("title", plan_doc.get("filename", ""))
-            date_ctx = f" (written {plan_doc['first_git_date']})" if plan_doc.get("first_git_date") else ""
+            # File is gone (stale mdops path) but we know the doc existed — use the name as evidence
+            rel = plan_doc.get("rel_path", "") or plan_doc.get("filename", doc_name)
             text = (
-                f"I found a document called \"{title}\"{date_ctx} that you wrote about {repo}. "
-                f"It says: \"{preview}\". "
-                f"Reading that now — how much of that vision actually shipped? "
-                f"Where did reality diverge from the plan?"
+                f"You wrote a planning document called \"{doc_name}\" in {repo} ({rel}){date_ctx}. "
+                f"I can see it existed but the file isn't on disk anymore. "
+                f"What was in that document — what were you planning, and did any of it ship?"
             )
-            data_ref = str(plan_doc.get("id", ""))
+
+        data_ref = plan_doc.get("rel_path", "") or str(plan_doc.get("id", ""))
         qs.append({"seq": 4, "question_type": "vision", "question_text": text,
                    "data_source": f"repo_doc_{plan_source}", "data_ref": data_ref})
     else:

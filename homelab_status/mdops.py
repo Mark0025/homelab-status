@@ -292,8 +292,8 @@ def docs_for_repo(repo_name: str, owner: str = "Mark0025") -> list[dict]:
     """
     with _conn() as conn:
         rows = conn.execute("""
-            SELECT d.id, d.title, d.filename, d.full_path, d.word_count,
-                   d.git_root, d.git_remotes, d.file_updated_at,
+            SELECT d.id, d.title, d.filename, d.full_path, d.relative_path,
+                   d.word_count, d.git_root, d.git_remotes, d.file_updated_at,
                    p.name as project
             FROM documents d
             LEFT JOIN projects p ON d.project_id = p.id
