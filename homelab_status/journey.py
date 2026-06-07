@@ -371,7 +371,7 @@ def get_chapters() -> list[dict]:
 def get_episodes(chapter_name: str | None = None, status: str | None = None) -> list[dict]:
     init_db()
     with _conn() as conn:
-        where = []
+        where = ["e.repo_id IS NOT NULL"]   # exclude chapter-placeholder episodes
         params: list = []
         if chapter_name:
             where.append("c.name = ?")
@@ -379,7 +379,7 @@ def get_episodes(chapter_name: str | None = None, status: str | None = None) -> 
         if status:
             where.append("e.status = ?")
             params.append(status)
-        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        clause = "WHERE " + " AND ".join(where)
         rows = conn.execute(
             f"""SELECT e.*, c.name as chapter_name, c.title as chapter_title,
                        r.repo, r.org, r.language, r.total_commits, r.is_fork,
