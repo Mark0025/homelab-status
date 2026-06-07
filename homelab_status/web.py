@@ -28,6 +28,7 @@ from .journey import (
     get_chapters, get_episodes, get_episode_questions, get_journey_stats,
     scaffold_episodes, update_episode, save_answer,
 )
+from .enricher import enrich_all_episodes, enrich_one_episode
 
 api = FastAPI(title="Homelab Status", docs_url=None, redoc_url=None)
 
@@ -355,6 +356,20 @@ async def journey_scaffold():
     """(Re-)generate episode + question scaffolding from journey_repos."""
     n = scaffold_episodes()
     return JSONResponse({"episodes_created": n})
+
+
+@api.post("/api/journey/enrich")
+async def journey_enrich(limit: int | None = Query(None)):
+    """Replace generic template questions with specific ones built from real commit data."""
+    result = enrich_all_episodes(limit=limit)
+    return JSONResponse(result)
+
+
+@api.post("/api/journey/episode/{episode_id}/enrich")
+async def journey_enrich_one(episode_id: int):
+    """Deep-dive enrich a single episode from its real commit history + PAI learnings."""
+    result = enrich_one_episode(episode_id)
+    return JSONResponse(result)
 
 
 @api.get("/", response_class=HTMLResponse)
@@ -1818,6 +1833,8 @@ async function loadJourneyEpisode(id) {
       ${!qs.length ? '<div style="color:var(--muted);font-size:12px">No questions scaffolded for this episode yet.</div>' : ''}
     </div>
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap">
+      <button onclick="deepDiveEpisode(${id})"
+        style="background:var(--purple);border:none;color:#fff;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">🔍 Deep Dive</button>
       <button onclick="markEpisodeStatus(${id},'scheduled')"
         style="background:var(--surface2);border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">📅 Schedule</button>
       <button onclick="markEpisodeStatus(${id},'recorded')"
@@ -1834,6 +1851,19 @@ async function markEpisodeStatus(id, status) {
   });
   journeyInited = false;
   await loadJourneyEpisodes();
+  await loadJourneyEpisode(id);
+}
+
+async function deepDiveEpisode(id) {
+  const detail = document.getElementById('j-episode-detail');
+  detail.innerHTML = '<div style="color:var(--purple);font-size:13px;padding:20px 0">🔍 Running deep dive — pulling commit history and PAI learnings…</div>';
+  const res = await fetch(`/api/journey/episode/${id}/enrich`, {method:'POST'});
+  const data = await res.json();
+  if (data.error) {
+    detail.innerHTML = `<div style="color:var(--red)">${data.error}</div>`;
+    return;
+  }
+  // reload the enriched questions
   await loadJourneyEpisode(id);
 }
 
