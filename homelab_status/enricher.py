@@ -22,9 +22,17 @@ from typing import Optional
 from loguru import logger
 
 from .db import _conn, init_db
+from .mdops import search_docs, get_doc
 
 JOURNEY_JSON = Path(__file__).parent.parent / "data" / "journey_v1.json"
 PAI_LEARNINGS = Path.home() / ".claude" / "context" / "learnings"
+
+# Doc filenames that signal vision/plan content (checked against filename, not full path)
+_PLAN_SIGNALS = re.compile(
+    r"(plan|vision|roadmap|spec|mcv|goals?|strategy|claude|what.user.actually|"
+    r"what.we.built|whats.working|changelog|dev.man|readme|analysis|launch)",
+    re.I,
+)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -66,6 +74,54 @@ def _find_pai_learnings(repo: str) -> list[dict]:
                 hits.append({"file": path.name, "summary": summary, "path": str(path)})
         except Exception:
             pass
+    return hits
+
+
+def _find_mdops_docs(repo: str) -> list[dict]:
+    """
+    Query the mdops DB for documents that mention this repo.
+    Returns docs ranked by relevance — plan/vision docs first, then analysis docs.
+    Each result: {id, title, filename, content_preview, is_plan_doc}
+    """
+    try:
+        results = search_docs(repo, limit=20)
+    except Exception:
+        return []
+
+    hits = []
+    for r in results:
+        filename = r.get("filename", "")
+        title = r.get("title", "")
+        doc_id = r.get("id")
+        if not doc_id:
+            continue
+        is_plan = bool(_PLAN_SIGNALS.search(filename) or _PLAN_SIGNALS.search(title))
+
+        # Pull full content for plan docs — they contain the real vision/reality gap
+        content_preview = ""
+        if is_plan:
+            try:
+                full = get_doc(doc_id)
+                raw = full.get("content", "") or ""
+                # strip markdown headers and pull first 600 chars of real content
+                lines = [
+                    l.strip() for l in raw.splitlines()
+                    if l.strip() and not l.startswith("#") and len(l.strip()) > 30
+                ]
+                content_preview = " ".join(lines)[:600]
+            except Exception:
+                pass
+
+        hits.append({
+            "id": doc_id,
+            "title": title,
+            "filename": filename,
+            "content_preview": content_preview,
+            "is_plan_doc": is_plan,
+        })
+
+    # plan docs first
+    hits.sort(key=lambda h: (0 if h["is_plan_doc"] else 1, h["title"]))
     return hits
 
 
@@ -114,6 +170,7 @@ def _build_specific_questions(
     signals: dict,
     learnings: list[dict],
     repo_row: dict,
+    mdops_docs: list[dict] | None = None,
 ) -> list[dict]:
     """
     Build 5 specific questions from real data.
@@ -208,7 +265,7 @@ def _build_specific_questions(
                    "question_text": f"What did {repo} teach you that you used somewhere else?",
                    "data_source": "manual", "data_ref": ""})
 
-    # ── Q4: VISION ────────────────────────────────────────────────────────────
+    # ── Q4: VISION vs REALITY (from mdops plan docs when available) ──────────
     chapter_map = {
         "collecting_era": "You were collecting tools in 2023, before you knew what you'd build.",
         "learning_era": "You were following other people's tutorials and frameworks.",
@@ -218,13 +275,29 @@ def _build_specific_questions(
     }
     era_context = chapter_map.get(chapter, "")
 
-    text = (
-        f"{era_context} "
-        f"What was your MCV — Mark Carpenter Vision — for {repo}? "
-        f"In one sentence: what did you want this to become?"
-    )
-    qs.append({"seq": 4, "question_type": "vision", "question_text": text.strip(),
-               "data_source": "manual", "data_ref": ""})
+    # Try to use actual plan/vision docs from mdops
+    plan_doc = None
+    if mdops_docs:
+        plan_doc = next((d for d in mdops_docs if d["is_plan_doc"] and d.get("content_preview")), None)
+
+    if plan_doc:
+        preview = plan_doc["content_preview"][:400]
+        text = (
+            f"I found a document called \"{plan_doc['title']}\" that you wrote about {repo}. "
+            f"It says: \"{preview}\". "
+            f"Reading that now — how much of that vision actually shipped? "
+            f"Where did reality diverge from the plan?"
+        )
+        qs.append({"seq": 4, "question_type": "vision", "question_text": text,
+                   "data_source": "mdops_doc", "data_ref": str(plan_doc["id"])})
+    else:
+        text = (
+            f"{era_context} "
+            f"What was your MCV — Mark Carpenter Vision — for {repo}? "
+            f"In one sentence: what did you want this to become, and how close did you get?"
+        )
+        qs.append({"seq": 4, "question_type": "vision", "question_text": text.strip(),
+                   "data_source": "manual", "data_ref": ""})
 
     # ── Q5: PERSONAL / IDENTITY ───────────────────────────────────────────────
     if chapter == "collecting_era":
@@ -300,7 +373,8 @@ def enrich_all_episodes(limit: int | None = None) -> dict:
             commits = _commits_for_repo(timeline, org, repo)
             signals = _pick_signal_commits(commits)
             learnings = _find_pai_learnings(repo)
-            questions = _build_specific_questions(repo, org, signals, learnings, row)
+            mdops_docs = _find_mdops_docs(repo)
+            questions = _build_specific_questions(repo, org, signals, learnings, row, mdops_docs)
 
             with _conn() as conn:
                 # Replace existing questions for this episode
@@ -346,7 +420,8 @@ def enrich_one_episode(episode_id: int) -> dict:
     commits = _commits_for_repo(timeline, row["org"], row["repo"])
     signals = _pick_signal_commits(commits)
     learnings = _find_pai_learnings(row["repo"])
-    questions = _build_specific_questions(row["repo"], row["org"], signals, learnings, row)
+    mdops_docs = _find_mdops_docs(row["repo"])
+    questions = _build_specific_questions(row["repo"], row["org"], signals, learnings, row, mdops_docs)
 
     ts = datetime.now().isoformat()
     with _conn() as conn:
@@ -364,5 +439,7 @@ def enrich_one_episode(episode_id: int) -> dict:
         "repo": row["repo"],
         "questions": questions,
         "learnings_found": len(learnings),
+        "mdops_docs_found": len(mdops_docs),
+        "plan_docs_found": sum(1 for d in mdops_docs if d["is_plan_doc"]),
         "commits_found": len(commits),
     }
