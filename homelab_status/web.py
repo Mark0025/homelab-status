@@ -24,6 +24,10 @@ from .project_intel import (
 )
 from .services import CATEGORY_LABELS, SERVICES
 from .mdops import doc_stats, docs_for_repo, get_doc, grade_doc, list_projects, search_docs
+from .journey import (
+    get_chapters, get_episodes, get_episode_questions, get_journey_stats,
+    scaffold_episodes, update_episode, save_answer,
+)
 
 api = FastAPI(title="Homelab Status", docs_url=None, redoc_url=None)
 
@@ -300,6 +304,59 @@ async def mdops_repo_docs(repo_name: str):
     return JSONResponse(docs_for_repo(repo_name))
 
 
+# ── Journey endpoints ─────────────────────────────────────────────────────────
+
+@api.get("/api/journey/stats")
+async def journey_stats():
+    """High-level counts for the journey dashboard."""
+    return JSONResponse(get_journey_stats())
+
+
+@api.get("/api/journey/chapters")
+async def journey_chapters():
+    """All 5 eras with episode counts."""
+    return JSONResponse({"chapters": get_chapters()})
+
+
+@api.get("/api/journey/episodes")
+async def journey_episodes(
+    chapter: str | None = Query(None),
+    status: str | None = Query(None),
+):
+    """Episodes filtered by chapter and/or status."""
+    rows = get_episodes(chapter_name=chapter, status=status)
+    return JSONResponse({"total": len(rows), "episodes": rows})
+
+
+@api.get("/api/journey/episode/{episode_id}/questions")
+async def journey_questions(episode_id: int):
+    """All Q&A for one episode, ordered by seq."""
+    rows = get_episode_questions(episode_id)
+    return JSONResponse({"total": len(rows), "questions": rows})
+
+
+@api.patch("/api/journey/episode/{episode_id}")
+async def journey_update_episode(episode_id: int, payload: dict):
+    """Update episode fields (status, audio_url, transcript, etc.)."""
+    update_episode(episode_id, **payload)
+    return JSONResponse({"ok": True})
+
+
+@api.post("/api/journey/question/{question_id}/answer")
+async def journey_save_answer(question_id: int, payload: dict):
+    """Store Mark's answer for a question post-interview."""
+    answer = payload.get("answer_text", "")
+    save_answer(question_id, answer)
+    return JSONResponse({"ok": True})
+
+
+@api.post("/api/journey/scaffold")
+async def journey_scaffold():
+    """(Re-)generate episode + question scaffolding from journey_repos."""
+    n = scaffold_episodes()
+    return JSONResponse({"episodes_created": n})
+
+
 @api.get("/", response_class=HTMLResponse)
 async def dashboard():
     if not _cache["results"]:
@@ -488,6 +545,7 @@ _HTML = """<!DOCTYPE html>
   <div class="tab" onclick="showTab('timeline', this)">Timeline &amp; Analytics</div>
   <div class="tab" onclick="showTab('intel', this)">Dev Intelligence</div>
   <div class="tab" onclick="showTab('plans', this)">Plans &amp; Docs <span id="plans-count-badge" style="color:var(--muted);font-size:11px"></span></div>
+  <div class="tab" onclick="showTab('journey', this)">Journey 🎙️ <span id="journey-ep-badge" style="color:var(--purple);font-size:11px"></span></div>
 </div>
 
 <!-- SERVICES TAB -->
@@ -634,6 +692,55 @@ _HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- JOURNEY TAB -->
+<div id="journey-view" style="display:none;padding:16px 24px">
+
+  <!-- Stats bar -->
+  <div id="journey-stats" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px"></div>
+
+  <!-- Chapter picker -->
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <span style="font-size:12px;color:var(--muted);font-weight:600">ERA:</span>
+    <button class="j-era-btn active" data-era="" onclick="selectEra('',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">All</button>
+    <button class="j-era-btn" data-era="collecting_era" onclick="selectEra('collecting_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">📦 Collecting</button>
+    <button class="j-era-btn" data-era="learning_era" onclick="selectEra('learning_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">📚 Learning</button>
+    <button class="j-era-btn" data-era="building_era" onclick="selectEra('building_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">🔨 Building</button>
+    <button class="j-era-btn" data-era="going_all_in" onclick="selectEra('going_all_in',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">🚀 Going All In</button>
+    <button class="j-era-btn" data-era="infrastructure_era" onclick="selectEra('infrastructure_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">⚙️ Infrastructure</button>
+
+    <span style="margin-left:auto;font-size:12px;color:var(--muted)">Status:</span>
+    <select id="j-status-filter" onchange="loadJourneyEpisodes()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:12px">
+      <option value="">All</option>
+      <option value="draft">Draft</option>
+      <option value="scheduled">Scheduled</option>
+      <option value="recorded">Recorded</option>
+      <option value="published">Published</option>
+    </select>
+  </div>
+
+  <!-- Episode list + detail split -->
+  <div style="display:grid;grid-template-columns:420px 1fr;gap:16px;height:calc(100vh - 260px)">
+
+    <!-- Episode list -->
+    <div style="overflow-y:auto;display:flex;flex-direction:column;gap:6px" id="j-episode-list">
+      <div style="color:var(--muted);font-size:12px;padding:20px 0">Loading episodes…</div>
+    </div>
+
+    <!-- Episode detail -->
+    <div id="j-episode-detail" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-y:auto">
+      <div style="color:var(--muted);font-size:13px">← Select an episode to see its interview questions.</div>
+    </div>
+
+  </div>
+</div>
+
 <!-- GIT TAB -->
 <div id="git-view" style="display:none">
   <div style="padding:16px 24px 0">
@@ -685,11 +792,13 @@ function showTab(name, el) {
   document.getElementById('timeline-view').style.display = name === 'timeline' ? '' : 'none';
   document.getElementById('intel-view').style.display = name === 'intel' ? '' : 'none';
   document.getElementById('plans-view').style.display = name === 'plans' ? '' : 'none';
+  document.getElementById('journey-view').style.display = name === 'journey' ? '' : 'none';
   if (name === 'routes' && !allRoutes) loadRoutes();
   if (name === 'git') loadGitHistory();
   if (name === 'timeline') initTimeline();
   if (name === 'intel') initIntel();
   if (name === 'plans') initPlans();
+  if (name === 'journey') initJourney();
 }
 
 // ── Dev Intelligence tab ──────────────────────────────────────────────────
@@ -1604,6 +1713,146 @@ async function openPlansDetail(id) {
 
 function closePlansDetail() {
   document.getElementById('plans-detail').style.display = 'none';
+}
+
+// ── Journey tab ───────────────────────────────────────────────────────────────
+let journeyInited = false;
+let activeEra = '';
+
+async function initJourney() {
+  if (journeyInited) return;
+  journeyInited = true;
+  const stats = await fetch('/api/journey/stats').then(r => r.json());
+  renderJourneyStats(stats);
+  document.getElementById('journey-ep-badge').textContent = stats.total_episodes ? `(${stats.total_episodes})` : '';
+  await loadJourneyEpisodes();
+}
+
+function renderJourneyStats(s) {
+  const el = document.getElementById('journey-stats');
+  if (!el) return;
+  el.innerHTML = [
+    ['Repos', s.total_repos || 0, 'var(--blue)'],
+    ['Episodes', s.total_episodes || 0, 'var(--purple)'],
+    ['Questions', s.total_questions || 0, 'var(--cyan)'],
+    ['Answered', s.answered_questions || 0, 'var(--green)'],
+    ['Recorded', s.recorded_episodes || 0, 'var(--yellow)'],
+    ['Published', s.published_episodes || 0, 'var(--green)'],
+  ].map(([lbl, val, color]) => `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 18px;min-width:90px;text-align:center">
+      <div style="font-size:22px;font-weight:700;color:${color}">${val}</div>
+      <div style="font-size:11px;color:var(--muted)">${lbl}</div>
+    </div>`).join('');
+}
+
+function selectEra(era, btn) {
+  activeEra = era;
+  document.querySelectorAll('.j-era-btn').forEach(b => {
+    b.style.color = 'var(--muted)'; b.classList.remove('active');
+  });
+  btn.style.color = 'var(--text)'; btn.classList.add('active');
+  journeyInited = false; // allow reload
+  loadJourneyEpisodes();
+}
+
+async function loadJourneyEpisodes() {
+  const status = document.getElementById('j-status-filter')?.value || '';
+  let url = '/api/journey/episodes?';
+  if (activeEra) url += `chapter=${activeEra}&`;
+  if (status) url += `status=${status}`;
+  const data = await fetch(url).then(r => r.json());
+  renderJourneyList(data.episodes || []);
+}
+
+const STATUS_COLOR = {draft:'#64748b', scheduled:'#f59e0b', recorded:'#3b82f6', published:'#22c55e'};
+
+function renderJourneyList(eps) {
+  const el = document.getElementById('j-episode-list');
+  if (!eps.length) { el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:20px 0">No episodes found.</div>'; return; }
+  el.innerHTML = eps.map(e => `
+    <div onclick="loadJourneyEpisode(${e.id})"
+      style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 14px;cursor:pointer;transition:border-color 0.15s"
+      onmouseover="this.style.borderColor='var(--blue)'" onmouseout="this.style.borderColor='var(--border)'"
+      id="j-ep-card-${e.id}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
+        <span style="font-size:13px;font-weight:600;color:var(--text);flex:1">${e.title || '(untitled)'}</span>
+        <span style="font-size:10px;padding:2px 7px;border-radius:10px;white-space:nowrap;
+          background:${STATUS_COLOR[e.status]||'#64748b'}22;color:${STATUS_COLOR[e.status]||'#64748b'};border:1px solid ${STATUS_COLOR[e.status]||'#64748b'}55">${e.status}</span>
+      </div>
+      ${e.hook ? `<div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${e.hook.slice(0,100)}${e.hook.length>100?'…':''}"</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+        ${e.chapter ? `<span style="font-size:10px;color:var(--purple)">${e.chapter.replace(/_/g,' ')}</span>` : ''}
+        ${e.language ? `<span style="font-size:10px;color:var(--cyan)">${e.language}</span>` : ''}
+        ${e.total_commits ? `<span style="font-size:10px;color:var(--muted)">${e.total_commits} commits</span>` : ''}
+        ${e.question_count !== undefined ? `<span style="font-size:10px;color:var(--muted)">${e.question_count} Qs</span>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+async function loadJourneyEpisode(id) {
+  const detail = document.getElementById('j-episode-detail');
+  detail.innerHTML = '<div style="color:var(--muted);font-size:12px">Loading…</div>';
+  const data = await fetch(`/api/journey/episode/${id}/questions`).then(r => r.json());
+  const qs = data.questions || [];
+  const ep = qs[0] ? {episode_id: id} : {episode_id: id};
+
+  const TYPE_COLOR = {origin:'#a855f7',technical:'#3b82f6',failure:'#ef4444',vision:'#22c55e',personal:'#f59e0b',pivot:'#06b6d4'};
+
+  detail.innerHTML = `
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px">${qs.length} interview questions</div>
+      ${qs.map((q,i) => `
+        <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:6px;border-left:3px solid ${TYPE_COLOR[q.question_type]||'#64748b'}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:10px;color:${TYPE_COLOR[q.question_type]||'#64748b'};font-weight:600;text-transform:uppercase">${q.question_type||'general'}</span>
+            <span style="font-size:10px;color:var(--muted)">Q${i+1}</span>
+          </div>
+          <div style="font-size:13px;color:var(--text);font-weight:500;margin-bottom:8px">${q.question_text}</div>
+          ${q.data_source ? `<div style="font-size:10px;color:var(--muted)">Source: <code style="color:var(--cyan)">${q.data_source}</code>${q.data_ref?` · ${q.data_ref.slice(0,40)}`:''}</div>` : ''}
+          ${q.answer_text
+            ? `<div style="margin-top:8px;padding:8px;background:var(--surface);border-radius:4px;border:1px solid var(--border);font-size:12px;color:var(--text)">${q.answer_text}</div>`
+            : `<button onclick="markAnswered(${q.id})"
+                style="margin-top:8px;background:none;border:1px dashed var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px">
+                + Add answer</button>`}
+        </div>`).join('')}
+      ${!qs.length ? '<div style="color:var(--muted);font-size:12px">No questions scaffolded for this episode yet.</div>' : ''}
+    </div>
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap">
+      <button onclick="markEpisodeStatus(${id},'scheduled')"
+        style="background:var(--surface2);border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">📅 Schedule</button>
+      <button onclick="markEpisodeStatus(${id},'recorded')"
+        style="background:var(--surface2);border:1px solid #3b82f6;color:#3b82f6;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">🎙️ Mark Recorded</button>
+      <button onclick="markEpisodeStatus(${id},'published')"
+        style="background:var(--surface2);border:1px solid #22c55e;color:#22c55e;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">✅ Published</button>
+    </div>`;
+}
+
+async function markEpisodeStatus(id, status) {
+  await fetch(`/api/journey/episode/${id}`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({status})
+  });
+  journeyInited = false;
+  await loadJourneyEpisodes();
+  await loadJourneyEpisode(id);
+}
+
+async function markAnswered(qid) {
+  const ans = prompt('Your answer:');
+  if (!ans) return;
+  await fetch(`/api/journey/question/${qid}/answer`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({answer_text: ans})
+  });
+  // reload the current episode detail
+  const activeCard = document.querySelector('.j-era-btn.active');
+  // find which episode is open by re-fetching parent episode
+  const detailEl = document.getElementById('j-episode-detail');
+  const btn = detailEl.querySelector('button[onclick^="markEpisodeStatus"]');
+  if (btn) {
+    const m = btn.getAttribute('onclick').match(/[0-9]+/);
+    if (m) loadJourneyEpisode(parseInt(m[0]));
+  }
 }
 </script>
 </body>

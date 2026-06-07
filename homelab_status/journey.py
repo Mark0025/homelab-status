@@ -383,7 +383,8 @@ def get_episodes(chapter_name: str | None = None, status: str | None = None) -> 
         rows = conn.execute(
             f"""SELECT e.*, c.name as chapter_name, c.title as chapter_title,
                        r.repo, r.org, r.language, r.total_commits, r.is_fork,
-                       r.first_commit_date, r.description as repo_description
+                       r.first_commit_date, r.description as repo_description,
+                       (SELECT COUNT(*) FROM journey_questions q WHERE q.episode_id = e.id) as question_count
                 FROM journey_episodes e
                 LEFT JOIN journey_chapters c ON c.id = e.chapter_id
                 LEFT JOIN journey_repos r ON r.id = e.repo_id
@@ -419,10 +420,16 @@ def get_journey_stats() -> dict:
         date_range = conn.execute(
             "SELECT MIN(first_commit_date) as first, MAX(last_commit_date) as last FROM journey_repos"
         ).fetchone()
+        questions = conn.execute("SELECT COUNT(*) as n FROM journey_questions").fetchone()["n"]
+        answered = conn.execute("SELECT COUNT(*) as n FROM journey_questions WHERE answer_text IS NOT NULL AND answer_text != ''").fetchone()["n"]
     return {
         "total_repos": repos,
         "total_chapters": chapters,
         "total_episodes": episodes,
+        "total_questions": questions,
+        "answered_questions": answered,
+        "recorded_episodes": by_status.get("recorded", 0),
+        "published_episodes": by_status.get("published", 0),
         "episodes_by_status": by_status,
         "first_commit": (date_range["first"] or "")[:10],
         "last_commit": (date_range["last"] or "")[:10],
