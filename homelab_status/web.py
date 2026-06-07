@@ -371,7 +371,9 @@ async def journey_enrich(limit: int | None = Query(None)):
 @api.post("/api/journey/episode/{episode_id}/enrich")
 async def journey_enrich_one(episode_id: int):
     """Deep-dive enrich a single episode from its real commit history + PAI learnings."""
-    result = enrich_one_episode(episode_id)
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, enrich_one_episode, episode_id)
     return JSONResponse(result)
 
 
@@ -1966,15 +1968,18 @@ async function loadJourneyEpisode(id, persona) {
     ${!qs.length ? '<div style="color:var(--muted);font-size:12px">No questions scaffolded yet.</div>' : ''}
 
     <!-- Action bar -->
-    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap">
-      <button onclick="deepDiveEpisode(${id})"
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button id="deep-dive-btn-${id}" onclick="deepDiveEpisode(${id})"
         style="background:var(--purple);border:none;color:#fff;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">🔍 Deep Dive</button>
-      <button onclick="markEpisodeStatus(${id},'scheduled')"
-        style="background:var(--surface2);border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">📅 Schedule</button>
-      <button onclick="markEpisodeStatus(${id},'recorded')"
-        style="background:var(--surface2);border:1px solid #3b82f6;color:#3b82f6;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">🎙️ Mark Recorded</button>
-      <button onclick="markEpisodeStatus(${id},'published')"
-        style="background:var(--surface2);border:1px solid #22c55e;color:#22c55e;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">✅ Published</button>
+      <span style="font-size:10px;color:var(--muted)">Status:</span>
+      <button onclick="cycleEpisodeStatus(${id},'draft')"
+        style="background:var(--surface2);border:1px solid ${STATUS_COLOR['draft']||'#64748b'}55;color:${STATUS_COLOR['draft']||'#64748b'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px">📝 Draft</button>
+      <button onclick="cycleEpisodeStatus(${id},'scheduled')"
+        style="background:var(--surface2);border:1px solid #f59e0b55;color:#f59e0b;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px">📅 Scheduled</button>
+      <button onclick="cycleEpisodeStatus(${id},'recorded')"
+        style="background:var(--surface2);border:1px solid #3b82f655;color:#3b82f6;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px">🎙️ Recorded</button>
+      <button onclick="cycleEpisodeStatus(${id},'published')"
+        style="background:var(--surface2);border:1px solid #22c55e55;color:#22c55e;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px">✅ Published</button>
     </div>`;
 }
 
@@ -2041,27 +2046,35 @@ async function createPersona(epId) {
   }
 }
 
-async function markEpisodeStatus(id, status) {
+async function cycleEpisodeStatus(id, status) {
   await fetch(`/api/journey/episode/${id}`, {
     method:'PATCH', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({status})
   });
   journeyInited = false;
   await loadJourneyEpisodes();
-  await loadJourneyEpisode(id);
+  await loadJourneyEpisode(id, _currentPersona);
 }
 
 async function deepDiveEpisode(id) {
-  const detail = document.getElementById('j-episode-detail');
-  detail.innerHTML = '<div style="color:var(--purple);font-size:13px;padding:20px 0">🔍 Running deep dive — pulling commit history and PAI learnings…</div>';
-  const res = await fetch(`/api/journey/episode/${id}/enrich`, {method:'POST'});
-  const data = await res.json();
-  if (data.error) {
-    detail.innerHTML = `<div style="color:var(--red)">${data.error}</div>`;
-    return;
+  const btn = document.getElementById(`deep-dive-btn-${id}`);
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = '⏳ Diving…'; btn.disabled = true; }
+
+  try {
+    const res = await fetch(`/api/journey/episode/${id}/enrich`, {method:'POST'});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) {
+      alert('Deep dive error: ' + data.error);
+      return;
+    }
+    await loadJourneyEpisode(id, _currentPersona);
+  } catch(e) {
+    alert('Deep dive failed: ' + e.message);
+  } finally {
+    if (btn) { btn.textContent = origText; btn.disabled = false; }
   }
-  // reload the enriched questions
-  await loadJourneyEpisode(id);
 }
 
 async function markAnswered(qid) {
@@ -2071,15 +2084,7 @@ async function markAnswered(qid) {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({answer_text: ans})
   });
-  // reload the current episode detail
-  const activeCard = document.querySelector('.j-era-btn.active');
-  // find which episode is open by re-fetching parent episode
-  const detailEl = document.getElementById('j-episode-detail');
-  const btn = detailEl.querySelector('button[onclick^="markEpisodeStatus"]');
-  if (btn) {
-    const m = btn.getAttribute('onclick').match(/[0-9]+/);
-    if (m) loadJourneyEpisode(parseInt(m[0]));
-  }
+  if (_currentEpisodeId) await loadJourneyEpisode(_currentEpisodeId, _currentPersona);
 }
 </script>
 </body>
