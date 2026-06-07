@@ -1,4 +1,4 @@
-"""SQLite persistence — check runs, API routes, business explanations, network topology."""
+"""SQLite persistence — check runs, API routes, business explanations, network topology, journey story layer."""
 
 import json
 import os
@@ -84,6 +84,79 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_api_routes_container ON api_routes(container_name);
         CREATE INDEX IF NOT EXISTS idx_topology_container  ON network_topology(container_name);
         CREATE INDEX IF NOT EXISTS idx_topology_network    ON network_topology(network_name);
+
+        -- ── JOURNEY STORY LAYER ────────────────────────────────────────────
+        -- sources: the raw GitHub snapshot (immutable, timestamped — never delete rows)
+        CREATE TABLE IF NOT EXISTS journey_repos (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            org           TEXT NOT NULL,
+            repo          TEXT NOT NULL,
+            created_at    TEXT,
+            description   TEXT,
+            is_fork       INTEGER DEFAULT 0,
+            language      TEXT,
+            topics        TEXT,   -- JSON array
+            total_commits INTEGER DEFAULT 0,
+            first_commit_date TEXT,
+            first_commit_msg  TEXT,
+            first_commit_sha  TEXT,
+            last_commit_date  TEXT,
+            last_commit_msg   TEXT,
+            readme_preview    TEXT,
+            has_docker    INTEGER DEFAULT 0,
+            has_tests     INTEGER DEFAULT 0,
+            has_ci        INTEGER DEFAULT 0,
+            has_claude_md INTEGER DEFAULT 0,
+            chapter       TEXT,   -- collecting_era | learning_era | building_era | going_all_in | infrastructure_era
+            notes         TEXT,
+            imported_at   TEXT NOT NULL,
+            UNIQUE(org, repo)
+        );
+
+        -- facts: the 5 eras of Mark's journey
+        CREATE TABLE IF NOT EXISTS journey_chapters (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,  -- e.g. 'collecting_era'
+            title       TEXT NOT NULL,         -- e.g. 'The Collecting Era'
+            start_date  TEXT NOT NULL,
+            end_date    TEXT NOT NULL,
+            narrative   TEXT,                  -- journalist's summary of this era
+            created_at  TEXT NOT NULL
+        );
+
+        -- stories: one interview episode per repo/moment — filled in as interviews happen
+        CREATE TABLE IF NOT EXISTS journey_episodes (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id   INTEGER REFERENCES journey_chapters(id),
+            repo_id      INTEGER REFERENCES journey_repos(id),
+            episode_num  INTEGER,
+            title        TEXT,
+            hook         TEXT,   -- the opening question / grabber line
+            status       TEXT NOT NULL DEFAULT 'draft',  -- draft | scheduled | recorded | published
+            recorded_at  TEXT,
+            published_at TEXT,
+            audio_url    TEXT,
+            transcript   TEXT,
+            created_at   TEXT NOT NULL
+        );
+
+        -- interview questions: the actual Q&A scaffold per episode
+        CREATE TABLE IF NOT EXISTS journey_questions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            episode_id    INTEGER REFERENCES journey_episodes(id),
+            seq           INTEGER NOT NULL,    -- question order within episode
+            question_text TEXT NOT NULL,
+            question_type TEXT,  -- origin | pivot | failure | vision | technical | personal
+            data_source   TEXT,  -- gh_commit | gh_repo | pai_learning | yt_transcript | manual
+            data_ref      TEXT,  -- sha, doc_id, url — the evidence this question is built on
+            answer_text   TEXT,  -- filled in after interview
+            recorded_at   TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_journey_repos_chapter ON journey_repos(chapter);
+        CREATE INDEX IF NOT EXISTS idx_journey_repos_org     ON journey_repos(org, repo);
+        CREATE INDEX IF NOT EXISTS idx_journey_episodes_status ON journey_episodes(status);
+        CREATE INDEX IF NOT EXISTS idx_journey_questions_ep  ON journey_questions(episode_id);
 
         -- Add columns if upgrading from older schema
         """)
