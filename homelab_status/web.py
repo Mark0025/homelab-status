@@ -26,7 +26,9 @@ from .services import CATEGORY_LABELS, SERVICES
 from .mdops import doc_stats, docs_for_repo, get_doc, grade_doc, list_projects, search_docs
 from .journey import (
     get_chapters, get_episodes, get_episode_questions, get_journey_stats,
-    scaffold_episodes, update_episode, save_answer,
+    scaffold_episodes, update_episode, save_answer, update_question,
+    get_personas, clone_questions_for_persona, refresh_all_deps, scan_repo_deps,
+    get_episode_deps,
 )
 from .enricher import enrich_all_episodes, enrich_one_episode
 
@@ -330,10 +332,11 @@ async def journey_episodes(
 
 
 @api.get("/api/journey/episode/{episode_id}/questions")
-async def journey_questions(episode_id: int):
-    """All Q&A for one episode, ordered by seq."""
-    rows = get_episode_questions(episode_id)
-    return JSONResponse({"total": len(rows), "questions": rows})
+async def journey_questions(episode_id: int, persona: str = Query("default")):
+    """All Q&A for one episode, optionally filtered by interviewer persona."""
+    rows = get_episode_questions(episode_id, persona=persona)
+    personas = get_personas(episode_id)
+    return JSONResponse({"total": len(rows), "questions": rows, "personas": personas})
 
 
 @api.patch("/api/journey/episode/{episode_id}")
@@ -369,6 +372,45 @@ async def journey_enrich(limit: int | None = Query(None)):
 async def journey_enrich_one(episode_id: int):
     """Deep-dive enrich a single episode from its real commit history + PAI learnings."""
     result = enrich_one_episode(episode_id)
+    return JSONResponse(result)
+
+
+@api.patch("/api/journey/question/{question_id}")
+async def journey_update_question(question_id: int, payload: dict):
+    """Edit a question's text. Marks is_edited=1 so enricher won't overwrite it."""
+    text = payload.get("question_text", "").strip()
+    if not text:
+        return JSONResponse({"error": "question_text required"}, status_code=400)
+    update_question(question_id, text)
+    return JSONResponse({"ok": True})
+
+
+@api.get("/api/journey/episode/{episode_id}/personas")
+async def journey_get_personas(episode_id: int):
+    """List all interviewer personas that have questions for this episode."""
+    return JSONResponse({"personas": get_personas(episode_id)})
+
+
+@api.post("/api/journey/episode/{episode_id}/persona")
+async def journey_create_persona(episode_id: int, payload: dict):
+    """Clone the default questions into a new interviewer persona."""
+    name = payload.get("name", "").strip().lower().replace(" ", "_")
+    if not name or name == "default":
+        return JSONResponse({"error": "name required and cannot be 'default'"}, status_code=400)
+    n = clone_questions_for_persona(episode_id, name)
+    return JSONResponse({"ok": True, "cloned": n, "persona": name})
+
+
+@api.get("/api/journey/episode/{episode_id}/deps")
+async def journey_episode_deps(episode_id: int):
+    """Return package deps for the repo attached to this episode."""
+    return JSONResponse(get_episode_deps(episode_id))
+
+
+@api.post("/api/journey/deps/refresh")
+async def journey_refresh_deps():
+    """Scan all locally cloned repos for package files and store deps_snapshot."""
+    result = refresh_all_deps()
     return JSONResponse(result)
 
 
@@ -1804,34 +1846,126 @@ function renderJourneyList(eps) {
     </div>`).join('');
 }
 
-async function loadJourneyEpisode(id) {
+// Track which episode + persona is currently open
+let _currentEpisodeId = null;
+let _currentPersona = 'default';
+
+async function loadJourneyEpisode(id, persona) {
+  _currentEpisodeId = id;
+  _currentPersona = persona || 'default';
+
   const detail = document.getElementById('j-episode-detail');
   detail.innerHTML = '<div style="color:var(--muted);font-size:12px">Loading…</div>';
-  const data = await fetch(`/api/journey/episode/${id}/questions`).then(r => r.json());
-  const qs = data.questions || [];
-  const ep = qs[0] ? {episode_id: id} : {episode_id: id};
 
+  const [qData, depsData] = await Promise.all([
+    fetch(`/api/journey/episode/${id}/questions?persona=${_currentPersona}`).then(r => r.json()),
+    fetch(`/api/journey/episode/${id}/deps`).then(r => r.json()),
+  ]);
+
+  const qs = qData.questions || [];
+  const personas = qData.personas || ['default'];
+  const deps = depsData.deps || {};
   const TYPE_COLOR = {origin:'#a855f7',technical:'#3b82f6',failure:'#ef4444',vision:'#22c55e',personal:'#f59e0b',pivot:'#06b6d4'};
 
+  // ── Persona tabs ───────────────────────────────────────────────────
+  const personaTabs = personas.map(p => `
+    <button onclick="loadJourneyEpisode(${id},'${p}')"
+      style="background:${p===_currentPersona?'var(--purple)':'var(--surface2)'};
+             border:1px solid ${p===_currentPersona?'var(--purple)':'var(--border)'};
+             color:${p===_currentPersona?'#fff':'var(--muted)'};
+             border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600">
+      ${p}
+    </button>`).join('');
+
+  // ── Deps panel ────────────────────────────────────────────────────
+  const depsSections = [];
+  if (deps.npm && deps.npm.length) {
+    depsSections.push(`<div style="margin-bottom:8px">
+      <div style="font-size:10px;font-weight:700;color:var(--cyan);margin-bottom:4px">NPM PACKAGES (${deps.npm.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${deps.npm.map(p=>`<code style="font-size:10px;background:var(--surface);padding:2px 6px;border-radius:3px;color:var(--text)">${p}</code>`).join('')}</div>
+    </div>`);
+  }
+  if (deps.pyproject && deps.pyproject.length) {
+    depsSections.push(`<div style="margin-bottom:8px">
+      <div style="font-size:10px;font-weight:700;color:var(--yellow);margin-bottom:4px">PYTHON (pyproject) (${deps.pyproject.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${deps.pyproject.map(p=>`<code style="font-size:10px;background:var(--surface);padding:2px 6px;border-radius:3px;color:var(--text)">${p}</code>`).join('')}</div>
+    </div>`);
+  }
+  if (deps.requirements && deps.requirements.length) {
+    depsSections.push(`<div style="margin-bottom:8px">
+      <div style="font-size:10px;font-weight:700;color:var(--yellow);margin-bottom:4px">PYTHON (requirements) (${deps.requirements.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${deps.requirements.map(p=>`<code style="font-size:10px;background:var(--surface);padding:2px 6px;border-radius:3px;color:var(--text)">${p}</code>`).join('')}</div>
+    </div>`);
+  }
+  const depsPanel = depsSections.length
+    ? `<details style="margin-bottom:16px">
+        <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">📦 Packages used in this repo</summary>
+        <div style="margin-top:8px;padding:10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">${depsSections.join('')}</div>
+       </details>`
+    : '';
+
+  // ── Questions list ─────────────────────────────────────────────────
+  const questionCards = qs.map((q,i) => `
+    <div id="qcard-${q.id}" style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:6px;border-left:3px solid ${TYPE_COLOR[q.question_type]||'#64748b'}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:10px;color:${TYPE_COLOR[q.question_type]||'#64748b'};font-weight:600;text-transform:uppercase">${q.question_type||'general'}</span>
+        <div style="display:flex;gap:6px;align-items:center">
+          ${q.is_edited ? '<span title="Human-edited" style="font-size:9px;padding:1px 5px;border-radius:8px;background:#a855f722;color:#a855f7;border:1px solid #a855f755">✏️ edited</span>' : ''}
+          <span style="font-size:10px;color:var(--muted)">Q${i+1}</span>
+        </div>
+      </div>
+
+      <div id="qtext-${q.id}"
+        style="font-size:13px;color:var(--text);font-weight:500;margin-bottom:6px;cursor:text"
+        title="Click to edit"
+        onclick="startEditQuestion(${q.id})">
+        ${escHtml(q.question_text)}
+      </div>
+      <div id="qedit-${q.id}" style="display:none">
+        <textarea id="qtextarea-${q.id}"
+          style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--blue);border-radius:4px;padding:6px;font-size:13px;color:var(--text);resize:vertical;min-height:60px"
+          >${escHtml(q.question_text)}</textarea>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button onclick="saveEditQuestion(${q.id})"
+            style="background:var(--blue);border:none;color:#fff;border-radius:4px;padding:3px 12px;cursor:pointer;font-size:11px;font-weight:600">Save</button>
+          <button onclick="cancelEditQuestion(${q.id})"
+            style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px">Cancel</button>
+        </div>
+      </div>
+
+      ${q.data_source ? `<div style="font-size:10px;color:var(--muted)">Source: <code style="color:var(--cyan)">${q.data_source}</code>${q.data_ref?` · <span title="${escHtml(q.data_ref)}">${q.data_ref.slice(0,60)}${q.data_ref.length>60?'…':''}</span>`:''}</div>` : ''}
+
+      ${q.answer_text
+        ? `<div style="margin-top:8px;padding:8px;background:var(--surface);border-radius:4px;border:1px solid var(--border);font-size:12px;color:var(--text)">${escHtml(q.answer_text)}</div>`
+        : `<button onclick="markAnswered(${q.id})"
+            style="margin-top:8px;background:none;border:1px dashed var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px">
+            + Add answer</button>`}
+    </div>`).join('');
+
   detail.innerHTML = `
-    <div style="margin-bottom:16px">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:12px">${qs.length} interview questions</div>
-      ${qs.map((q,i) => `
-        <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:6px;border-left:3px solid ${TYPE_COLOR[q.question_type]||'#64748b'}">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <span style="font-size:10px;color:${TYPE_COLOR[q.question_type]||'#64748b'};font-weight:600;text-transform:uppercase">${q.question_type||'general'}</span>
-            <span style="font-size:10px;color:var(--muted)">Q${i+1}</span>
-          </div>
-          <div style="font-size:13px;color:var(--text);font-weight:500;margin-bottom:8px">${q.question_text}</div>
-          ${q.data_source ? `<div style="font-size:10px;color:var(--muted)">Source: <code style="color:var(--cyan)">${q.data_source}</code>${q.data_ref?` · ${q.data_ref.slice(0,40)}`:''}</div>` : ''}
-          ${q.answer_text
-            ? `<div style="margin-top:8px;padding:8px;background:var(--surface);border-radius:4px;border:1px solid var(--border);font-size:12px;color:var(--text)">${q.answer_text}</div>`
-            : `<button onclick="markAnswered(${q.id})"
-                style="margin-top:8px;background:none;border:1px dashed var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;cursor:pointer;font-size:11px">
-                + Add answer</button>`}
-        </div>`).join('')}
-      ${!qs.length ? '<div style="color:var(--muted);font-size:12px">No questions scaffolded for this episode yet.</div>' : ''}
+    <!-- Persona bar -->
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
+      <span style="font-size:10px;color:var(--muted);font-weight:600">PERSONA:</span>
+      ${personaTabs}
+      <button onclick="showCreatePersona(${id})"
+        style="background:none;border:1px dashed var(--border);color:var(--muted);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px">+ New</button>
+      <div id="new-persona-form-${id}" style="display:none;display:none">
+        <input id="new-persona-name-${id}" placeholder="e.g. technical_deep_dive"
+          style="background:var(--surface);border:1px solid var(--blue);border-radius:4px;padding:3px 8px;font-size:11px;color:var(--text);width:160px">
+        <button onclick="createPersona(${id})"
+          style="background:var(--blue);border:none;color:#fff;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;margin-left:4px">Create</button>
+      </div>
     </div>
+
+    <!-- Deps panel -->
+    ${depsPanel}
+
+    <!-- Questions -->
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">${qs.length} questions — click any question text to edit inline</div>
+    ${questionCards}
+    ${!qs.length ? '<div style="color:var(--muted);font-size:12px">No questions scaffolded yet.</div>' : ''}
+
+    <!-- Action bar -->
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap">
       <button onclick="deepDiveEpisode(${id})"
         style="background:var(--purple);border:none;color:#fff;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">🔍 Deep Dive</button>
@@ -1842,6 +1976,69 @@ async function loadJourneyEpisode(id) {
       <button onclick="markEpisodeStatus(${id},'published')"
         style="background:var(--surface2);border:1px solid #22c55e;color:#22c55e;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">✅ Published</button>
     </div>`;
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function startEditQuestion(qid) {
+  document.getElementById(`qtext-${qid}`).style.display = 'none';
+  document.getElementById(`qedit-${qid}`).style.display = '';
+  document.getElementById(`qtextarea-${qid}`).focus();
+}
+
+function cancelEditQuestion(qid) {
+  document.getElementById(`qedit-${qid}`).style.display = 'none';
+  document.getElementById(`qtext-${qid}`).style.display = '';
+}
+
+async function saveEditQuestion(qid) {
+  const text = document.getElementById(`qtextarea-${qid}`).value.trim();
+  if (!text) return;
+  const res = await fetch(`/api/journey/question/${qid}`, {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({question_text: text}),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    // update display without full reload
+    const textEl = document.getElementById(`qtext-${qid}`);
+    textEl.textContent = text;
+    textEl.style.display = '';
+    document.getElementById(`qedit-${qid}`).style.display = 'none';
+    // mark as edited visually: add badge if not already there
+    const card = document.getElementById(`qcard-${qid}`);
+    if (card && !card.querySelector('.edited-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'edited-badge';
+      badge.style = 'font-size:9px;padding:1px 5px;border-radius:8px;background:#a855f722;color:#a855f7;border:1px solid #a855f755';
+      badge.textContent = '✏️ edited';
+      card.querySelector('div').appendChild(badge);
+    }
+  }
+}
+
+function showCreatePersona(epId) {
+  const form = document.getElementById(`new-persona-form-${epId}`);
+  form.style.display = form.style.display === 'none' ? '' : 'none';
+}
+
+async function createPersona(epId) {
+  const input = document.getElementById(`new-persona-name-${epId}`);
+  const name = input.value.trim();
+  if (!name) return;
+  const res = await fetch(`/api/journey/episode/${epId}/persona`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name}),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    input.value = '';
+    await loadJourneyEpisode(epId, name);
+  } else {
+    alert(data.error || 'Failed to create persona');
+  }
 }
 
 async function markEpisodeStatus(id, status) {

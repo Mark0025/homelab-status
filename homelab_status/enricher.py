@@ -609,13 +609,25 @@ def _enrich_row(row: dict, timeline: list) -> tuple[list[dict], dict]:
 
     episode_id = row["episode_id"]
     with _conn() as conn:
-        conn.execute("DELETE FROM journey_questions WHERE episode_id=?", (episode_id,))
+        # Only replace non-edited questions — preserve human edits (is_edited=1)
+        conn.execute(
+            "DELETE FROM journey_questions WHERE episode_id=? AND persona='default' AND is_edited=0",
+            (episode_id,),
+        )
+        # Re-insert only questions that weren't already edited by the user
+        existing_edited_seqs = {
+            r[0] for r in conn.execute(
+                "SELECT seq FROM journey_questions WHERE episode_id=? AND persona='default' AND is_edited=1",
+                (episode_id,),
+            ).fetchall()
+        }
+        to_insert = [q for q in questions if q["seq"] not in existing_edited_seqs]
         conn.executemany(
             """INSERT INTO journey_questions
-               (episode_id, seq, question_text, question_type, data_source, data_ref)
-               VALUES (?,?,?,?,?,?)""",
+               (episode_id, seq, question_text, question_type, data_source, data_ref, persona, is_edited)
+               VALUES (?,?,?,?,?,?,'default',0)""",
             [(episode_id, q["seq"], q["question_text"], q["question_type"],
-              q["data_source"], q["data_ref"]) for q in questions],
+              q["data_source"], q["data_ref"]) for q in to_insert],
         )
 
     stats = {
