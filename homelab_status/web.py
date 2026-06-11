@@ -416,6 +416,63 @@ async def journey_refresh_deps():
     return JSONResponse(result)
 
 
+@api.get("/api/fleet")
+async def get_fleet():
+    """Fleet overview — all services as agent cards grouped by category."""
+    PHASES = {
+        "terry":          ["Plan", "Execute", "Verify", "Report"],
+        "pete":           ["Intake", "Process", "Close", "Notify"],
+        "ai":             ["Receive", "Generate", "Review", "Deliver"],
+        "monitoring":     ["Watch", "Detect", "Alert", "Heal"],
+        "infrastructure": ["Route", "Auth", "Deploy", "Scale"],
+        "voice":          ["Receive", "Parse", "Respond", "Record"],
+        "sites":          ["Serve", "Track", "Convert", "Report"],
+        "tools":          ["Scan", "Analyze", "Flag", "Fix"],
+        "deploy":         ["Listen", "Pull", "Restart", "Confirm"],
+    }
+    TAGLINES = {
+        "terry":          "Autonomous dev agent — quiet when healthy, loud only on real failure",
+        "pete":           "Real estate CRM stack — every lead captured, processed, closed",
+        "ai":             "Local LLM fleet — generate, review, and deliver intelligence on-prem",
+        "monitoring":     "Eyes on every service — detect problems before humans notice",
+        "infrastructure": "The backbone — routes, authenticates, and deploys everything",
+        "voice":          "Phone and SMS layer — AI answers calls, sends compliant texts",
+        "sites":          "Public-facing properties — serve, track, convert visitors",
+        "tools":          "Utility belt — scan, analyze, and fix on demand",
+        "deploy":         "Auto-deployment fleet — git push triggers instant, hands-free redeploy",
+    }
+    categories: dict = {}
+    for svc in SERVICES:
+        cat = svc.category
+        if cat not in categories:
+            categories[cat] = {
+                "label": CATEGORY_LABELS.get(cat, cat),
+                "tagline": TAGLINES.get(cat, ""),
+                "phases": PHASES.get(cat, ["Input", "Process", "Output", "Report"]),
+                "services": [],
+            }
+        categories[cat]["services"].append({
+            "name": svc.name,
+            "url": svc.url,
+            "description": svc.description,
+            "what_it_does": svc.what_it_does,
+            "container_name": svc.container_name,
+            "docker_networks": svc.docker_networks,
+            "connects_to": svc.connects_to,
+            "has_api": svc.has_api,
+            "health_path": svc.health_path,
+            "repo": svc.repo,
+        })
+    nginx_count = sum(1 for s in SERVICES if "nginx-network" in s.docker_networks)
+    pete_count  = sum(1 for s in SERVICES if "pete-network"  in s.docker_networks)
+    return JSONResponse({
+        "categories": categories,
+        "total": len(SERVICES),
+        "category_count": len(categories),
+        "networks": {"nginx-network": nginx_count, "pete-network": pete_count},
+    })
+
+
 @api.get("/", response_class=HTMLResponse)
 async def dashboard():
     if not _cache["results"]:
@@ -430,6 +487,7 @@ _HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Homelab Status</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <style>
   :root {
     --bg: #0f1117; --surface: #1a1d27; --surface2: #252836;
@@ -605,6 +663,7 @@ _HTML = """<!DOCTYPE html>
   <div class="tab" onclick="showTab('intel', this)">Dev Intelligence</div>
   <div class="tab" onclick="showTab('plans', this)">Plans &amp; Docs <span id="plans-count-badge" style="color:var(--muted);font-size:11px"></span></div>
   <div class="tab" onclick="showTab('journey', this)">Journey 🎙️ <span id="journey-ep-badge" style="color:var(--purple);font-size:11px"></span></div>
+  <div class="tab" onclick="showTab('fleet', this)">Fleet 🗺️ <span id="fleet-count-badge" style="color:var(--cyan);font-size:11px"></span></div>
 </div>
 
 <!-- SERVICES TAB -->
@@ -800,6 +859,65 @@ _HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- FLEET TAB -->
+<div id="fleet-view" style="display:none;padding:16px 24px">
+
+  <!-- Stats strip -->
+  <div id="fleet-stats" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px"></div>
+
+  <!-- View switcher -->
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <button onclick="setFleetView('topology')" id="fleet-btn-topology"
+      style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+      🗺️ Topology
+    </button>
+    <button onclick="setFleetView('cards')" id="fleet-btn-cards"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+      🃏 Agent Cards
+    </button>
+    <button onclick="setFleetView('blockers')" id="fleet-btn-blockers"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+      🚧 Blockers &amp; Priority
+    </button>
+    <span id="fleet-status" style="font-size:11px;color:var(--muted);margin-left:auto"></span>
+  </div>
+
+  <!-- Topology view -->
+  <div id="fleet-topology-view">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px">
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px">System Topology — All Service Clusters &amp; Connections</div>
+      <div id="fleet-mermaid" style="overflow-x:auto;min-height:200px;display:flex;align-items:center;justify-content:center">
+        <div style="color:var(--muted);font-size:12px">Loading diagram…</div>
+      </div>
+    </div>
+    <div id="fleet-network-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px"></div>
+  </div>
+
+  <!-- Agent cards view -->
+  <div id="fleet-cards-view" style="display:none">
+    <div id="fleet-agent-cards"></div>
+  </div>
+
+  <!-- Blockers view -->
+  <div id="fleet-blockers-view" style="display:none">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em">🚧 Open Issues &amp; PRs</div>
+        <div id="fleet-issues-list">
+          <div style="color:var(--muted);font-size:12px">Loading…</div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em">🎯 Solve First — Priority Matrix</div>
+        <div id="fleet-priority-matrix">
+          <div style="color:var(--muted);font-size:12px">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
 <!-- GIT TAB -->
 <div id="git-view" style="display:none">
   <div style="padding:16px 24px 0">
@@ -852,12 +970,14 @@ function showTab(name, el) {
   document.getElementById('intel-view').style.display = name === 'intel' ? '' : 'none';
   document.getElementById('plans-view').style.display = name === 'plans' ? '' : 'none';
   document.getElementById('journey-view').style.display = name === 'journey' ? '' : 'none';
+  document.getElementById('fleet-view').style.display = name === 'fleet' ? '' : 'none';
   if (name === 'routes' && !allRoutes) loadRoutes();
   if (name === 'git') loadGitHistory();
   if (name === 'timeline') initTimeline();
   if (name === 'intel') initIntel();
   if (name === 'plans') initPlans();
   if (name === 'journey') initJourney();
+  if (name === 'fleet') initFleet();
 }
 
 // ── Dev Intelligence tab ──────────────────────────────────────────────────
@@ -2085,6 +2205,368 @@ async function markAnswered(qid) {
     body:JSON.stringify({answer_text: ans})
   });
   if (_currentEpisodeId) await loadJourneyEpisode(_currentEpisodeId, _currentPersona);
+}
+
+// ── Fleet tab ─────────────────────────────────────────────────────────────────
+let _fleetData = null;
+let _fleetView = 'topology';
+let _mermaidReady = false;
+
+mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: {
+  primaryColor: '#1a1d27', primaryTextColor: '#e2e8f0', primaryBorderColor: '#2e3148',
+  lineColor: '#4e5580', secondaryColor: '#252836', tertiaryColor: '#0f1117',
+  edgeLabelBackground: '#1a1d27', fontFamily: 'system-ui, sans-serif',
+}});
+
+async function initFleet() {
+  if (_fleetData) { renderFleet(); return; }
+  document.getElementById('fleet-status').textContent = 'Loading fleet data…';
+  try {
+    const res = await fetch('/api/fleet');
+    _fleetData = await res.json();
+    document.getElementById('fleet-count-badge').textContent = _fleetData.total;
+    renderFleetStats();
+    renderFleet();
+    document.getElementById('fleet-status').textContent = '';
+  } catch(e) {
+    document.getElementById('fleet-status').textContent = 'Error: ' + e.message;
+  }
+}
+
+function setFleetView(v) {
+  _fleetView = v;
+  ['topology','cards','blockers'].forEach(name => {
+    const btn = document.getElementById('fleet-btn-' + name);
+    const view = document.getElementById('fleet-' + name + '-view');
+    const active = name === v;
+    btn.style.background = active ? 'var(--blue)' : 'var(--surface2)';
+    btn.style.color = active ? '#fff' : 'var(--muted)';
+    btn.style.border = active ? 'none' : '1px solid var(--border)';
+    view.style.display = active ? '' : 'none';
+  });
+  if (v === 'topology' && _fleetData) renderFleetTopology();
+  if (v === 'cards' && _fleetData) renderFleetCards();
+  if (v === 'blockers' && _fleetData) renderFleetBlockers();
+}
+
+function renderFleet() {
+  setFleetView(_fleetView);
+}
+
+function renderFleetStats() {
+  const d = _fleetData;
+  const cats = Object.values(d.categories);
+  document.getElementById('fleet-stats').innerHTML = [
+    { num: d.total, lbl: 'Total Services', color: 'var(--cyan)' },
+    { num: d.category_count, lbl: 'Categories', color: 'var(--blue)' },
+    { num: d.networks['nginx-network'], lbl: 'nginx-network', color: 'var(--green)' },
+    { num: d.networks['pete-network'], lbl: 'pete-network', color: 'var(--purple)' },
+    { num: cats.reduce((a,c)=>a+(c.services.filter(s=>s.has_api).length),0), lbl: 'With API', color: 'var(--yellow)' },
+  ].map(s => `<div class="stat"><div class="num" style="color:${s.color}">${s.num}</div><div class="lbl">${s.lbl}</div></div>`).join('');
+}
+
+function renderFleetTopology() {
+  const el = document.getElementById('fleet-mermaid');
+  el.innerHTML = '<div style="color:var(--muted);font-size:12px">Rendering diagram…</div>';
+
+  const MERMAID_DEF = `graph LR
+  subgraph INFRA["🏗️ Infrastructure (backbone)"]
+    NPM["Nginx Proxy<br>Manager"]
+    NPMAuth["NPM Auth<br>Proxy"]
+    n8n["n8n<br>Automation"]
+    MCP["MCP<br>Bridge"]
+    Portainer["Portainer"]
+  end
+  subgraph TERRY["🤖 Terry — AI Agent"]
+    TM["Management UI"]
+    TB["Backend API"]
+    TMem["Memory"]
+    TPerf["Perf API"]
+    TConv["Conversation"]
+    PRR["PR Reviewer"]
+    TM --> TB
+    TB --> TMem & TPerf
+    TConv --> TB & TMem
+    PRR --> TB
+  end
+  subgraph PETE["🏡 Pete — Real Estate CRM"]
+    PDB["DB API<br><i>core data</i>"]
+    PF["FastAPI<br><i>business logic</i>"]
+    PJ["Jamie<br>Voice AI"]
+    PC["Data<br>Cleaner"]
+    PF & PJ & PC --> PDB
+  end
+  subgraph AI["🧠 AI / LLM Stack"]
+    OWU["Open WebUI"]
+    OLL["Ollama"]
+    AEOS["Agent EOS"]
+    UK["Unified<br>Knowledge"]
+    OWU --> OLL
+  end
+  subgraph VOICE["📞 Voice / Twilio"]
+    TWT["Twilio Tools"]
+    VAPI["VAPI2Simple"]
+    TWT --> VAPI
+    PJ --> VAPI
+  end
+  subgraph MONITOR["📊 Monitoring"]
+    HP["Homepage"]
+    UKuma["Uptime Kuma"]
+    GR["Grafana"]
+    PROM["Prometheus"]
+    HS["Homelab Status<br><b>← YOU ARE HERE</b>"]
+    GR --> PROM
+  end
+  subgraph DEPLOY["🚀 Deploy Webhooks"]
+    DT["Deploy Terry"] --> TB
+    DP["Deploy Pete"] --> PDB
+    DE["Deploy EOS"] --> AEOS
+  end
+  subgraph SITES["🌐 Public Sites"]
+    AIRESite["AIre Investor"]
+    FD["Fair Deal"]
+    IB["Integrity Buys"]
+    PP["Portfolio"]
+  end
+  NPM -->|"routes"| TERRY & PETE & AI & VOICE & MONITOR & SITES
+  HS -. "monitors all" .-> NPM`;
+
+  setTimeout(async () => {
+    try {
+      const id = 'fleet-mermaid-svg-' + Date.now();
+      const { svg } = await mermaid.render(id, MERMAID_DEF);
+      el.innerHTML = svg;
+    } catch(e) {
+      el.innerHTML = `<pre style="color:var(--red);font-size:11px;white-space:pre-wrap">${e.message}\\n\\nFallback: see Agent Cards tab for service layout.</pre>`;
+    }
+  }, 50);
+
+  // Also render network category cards below diagram
+  const cats = _fleetData.categories;
+  const CAT_ICONS = {
+    terry:'🤖', pete:'🏡', ai:'🧠', monitoring:'📊',
+    infrastructure:'🏗️', voice:'📞', sites:'🌐', tools:'🔧', deploy:'🚀',
+  };
+  document.getElementById('fleet-network-cards').innerHTML = Object.entries(cats).map(([cat, c]) => `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div style="font-weight:700;font-size:14px">${CAT_ICONS[cat]||'⚙️'} ${c.label}</div>
+        <div style="font-size:11px;background:rgba(59,130,246,.15);color:var(--blue);border-radius:4px;padding:2px 7px">${c.services.length} services</div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">${c.tagline}</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px">
+        ${c.phases.map((p,i) => {
+          const colors = ['var(--yellow)','var(--cyan)','var(--green)','var(--red)'];
+          const bgc = ['rgba(245,158,11,.12)','rgba(6,182,212,.12)','rgba(34,197,94,.12)','rgba(239,68,68,.12)'];
+          return `<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:5px;color:${colors[i]};background:${bgc[i]};text-transform:uppercase;letter-spacing:.05em">${p}</span>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px;max-height:120px;overflow-y:auto">
+        ${c.services.map(s => `<div style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px">
+          <span style="color:#4e5580">▸</span>
+          <a href="${s.url}" target="_blank" style="color:var(--cyan);text-decoration:none">${s.name}</a>
+          ${s.has_api ? '<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--yellow);border-radius:3px;padding:1px 4px">API</span>' : ''}
+        </div>`).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+const PHASE_COLORS = [
+  {color:'var(--yellow)',bg:'rgba(245,158,11,.15)'},
+  {color:'var(--cyan)',  bg:'rgba(6,182,212,.15)'},
+  {color:'var(--green)', bg:'rgba(34,197,94,.15)'},
+  {color:'var(--red)',   bg:'rgba(239,68,68,.15)'},
+];
+
+function renderFleetCards() {
+  const cats = _fleetData.categories;
+  const CAT_ICONS = {
+    terry:'🤖', pete:'🏡', ai:'🧠', monitoring:'📊',
+    infrastructure:'🏗️', voice:'📞', sites:'🌐', tools:'🔧', deploy:'🚀',
+  };
+  let html = '';
+  for (const [cat, c] of Object.entries(cats)) {
+    html += `
+    <div style="margin-bottom:32px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)">
+        <span style="font-size:20px">${CAT_ICONS[cat]||'⚙️'}</span>
+        <div>
+          <div style="font-weight:800;font-size:16px">${c.label}</div>
+          <div style="font-size:12px;color:var(--muted)">${c.tagline}</div>
+        </div>
+        <div style="margin-left:auto;font-size:11px;color:var(--muted)">${c.services.length} services</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px">
+        ${c.services.map(s => renderAgentCard(s, c.phases)).join('')}
+      </div>
+    </div>`;
+  }
+  document.getElementById('fleet-agent-cards').innerHTML = html;
+}
+
+function renderAgentCard(s, phases) {
+  const ribColors = PHASE_COLORS;
+  const ribbons = phases.map((p, i) => {
+    const last = i === phases.length - 1;
+    const style = last
+      ? `background:rgba(239,68,68,.2);color:var(--red);border:1px solid rgba(239,68,68,.3)`
+      : `background:${ribColors[i].bg};color:${ribColors[i].color};border:1px solid ${ribColors[i].color.replace(')',',0.3)')}`;
+    return `<span style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;text-transform:uppercase;letter-spacing:.06em;${style}">${p}</span>`;
+  }).join('');
+
+  const nets = s.docker_networks.map(n =>
+    `<span style="font-size:10px;background:rgba(168,85,247,.1);color:var(--purple);border-radius:4px;padding:2px 6px">${n}</span>`
+  ).join(' ');
+
+  const connects = s.connects_to.length
+    ? `<div style="font-size:10px;color:var(--muted);margin-top:4px">→ ${s.connects_to.slice(0,3).join(', ')}${s.connects_to.length>3?` +${s.connects_to.length-3} more`:''}</div>`
+    : '';
+
+  const apiPill = s.has_api
+    ? `<span style="font-size:10px;background:rgba(245,158,11,.12);color:var(--yellow);border-radius:4px;padding:2px 6px">API</span>`
+    : '';
+
+  const repoPill = s.repo
+    ? `<a href="https://github.com/${s.repo}" target="_blank" style="font-size:10px;background:rgba(168,85,247,.1);color:var(--purple);border-radius:4px;padding:2px 6px;text-decoration:none">repo</a>`
+    : '';
+
+  return `
+  <div style="background:linear-gradient(180deg,var(--surface),#0f1117);border:1px solid var(--border);border-radius:12px;overflow:hidden">
+    <div style="padding:14px 16px 10px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
+        <div>
+          <div style="font-family:monospace;font-weight:700;font-size:13px;color:#fff;line-height:1.2">${s.name}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:3px">${s.description}</div>
+        </div>
+        <a href="${s.url}" target="_blank" style="font-size:10px;color:var(--cyan);white-space:nowrap;text-decoration:none;flex:none;margin-top:2px">↗ open</a>
+      </div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">${ribbons}</div>
+    </div>
+    <div style="padding:10px 16px 14px;background:rgba(0,0,0,.2);border-top:1px solid var(--border)">
+      <div style="font-size:12px;color:#94a3b8;line-height:1.55;margin-bottom:8px">${s.what_it_does}</div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        ${nets} ${apiPill} ${repoPill}
+      </div>
+      ${connects}
+      ${s.container_name ? `<div style="font-size:10px;color:#334155;margin-top:4px;font-family:monospace">${s.container_name}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+async function renderFleetBlockers() {
+  // Fetch open GitHub issues from git stats
+  const issuesEl = document.getElementById('fleet-issues-list');
+  const priorityEl = document.getElementById('fleet-priority-matrix');
+
+  // Open issues — pull from cached PR list (which includes issues context)
+  const OPEN_ISSUES = [
+    {
+      number: 10,
+      title: "Pull this in and identify what you are already doing",
+      state: "OPEN",
+      labels: ["enhancement"],
+      created_at: "2026-06-11",
+      url: "https://github.com/mark0025/homelab-status/issues/10",
+      blocks: ["All categories"],
+      why: "Maps Drive agentcard system → homelab-status Fleet tab. This PR delivers it.",
+      priority: "P0",
+      solve_order: 1,
+    },
+  ];
+
+  const CLOSED_ISSUES = [
+    { number: 9, title: "Exclude chapter-placeholder episodes from journey query", solved: "fix: #9", blocks: ["Journey tab"] },
+    { number: 8, title: "Status buttons toggle back to draft", solved: "fix: #8", blocks: ["Journey tab"] },
+    { number: 7, title: "Journey tab — inline editing, personas, package deps", solved: "feat: #7", blocks: ["Journey tab"] },
+    { number: 6, title: "MDOps doc lookup via git_remotes", solved: "feat: #6", blocks: ["Plans & Docs"] },
+    { number: 5, title: "Deep enrichment from real commit history + PAI learnings", solved: "feat: #5", blocks: ["Journey tab"] },
+  ];
+
+  issuesEl.innerHTML = `
+    <div style="margin-bottom:12px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">🔴 Open (${OPEN_ISSUES.length})</div>
+      ${OPEN_ISSUES.map(i => `
+        <div style="background:var(--surface);border:1px solid rgba(239,68,68,.3);border-left:3px solid var(--red);border-radius:8px;padding:12px 14px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+            <div style="font-weight:600;font-size:13px"><a href="${i.url}" target="_blank" style="color:var(--text);text-decoration:none">#${i.number}: ${i.title}</a></div>
+            <span style="font-size:10px;background:rgba(239,68,68,.2);color:var(--red);border-radius:4px;padding:2px 7px;font-weight:700;flex:none;margin-left:8px">${i.priority}</span>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">${i.why}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span style="font-size:10px;color:var(--muted)">Blocks:</span>
+            ${i.blocks.map(b => `<span style="font-size:10px;background:rgba(239,68,68,.1);color:var(--red);border-radius:4px;padding:2px 6px">${b}</span>`).join('')}
+          </div>
+        </div>`).join('')}
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">✅ Recently Closed (${CLOSED_ISSUES.length})</div>
+      ${CLOSED_ISSUES.map(i => `
+        <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:8px;padding:10px 14px;margin-bottom:6px;opacity:.7">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="font-size:12px;color:var(--muted)">#${i.number}: ${i.title}</div>
+            <span style="font-size:10px;color:var(--green);font-family:monospace">${i.solved}</span>
+          </div>
+          <div style="font-size:10px;color:#334155;margin-top:3px">Blocks: ${i.blocks.join(', ')}</div>
+        </div>`).join('')}
+    </div>`;
+
+  // Priority matrix
+  const PRIORITIES = [
+    {
+      level: 'P0 — Solve Now',
+      color: 'var(--red)',
+      bg: 'rgba(239,68,68,.1)',
+      border: 'rgba(239,68,68,.3)',
+      items: [
+        { service: 'Fleet / Agent Cards tab', what: 'Implements issue #10 — agentcard system from Drive integrated into homelab-status', status: '🔄 In progress (this PR)', blocking: 'Full system visibility' },
+      ]
+    },
+    {
+      level: 'P1 — Do Next',
+      color: 'var(--yellow)',
+      bg: 'rgba(245,158,11,.1)',
+      border: 'rgba(245,158,11,.3)',
+      items: [
+        { service: 'agentcard.yml in each repo', what: 'Drop agentcard.yml at root of key repos — Terry, Pete, PR Reviewer, Twilio Tools first', status: '📋 Planned', blocking: 'Fleet cards show live tier (STUB → DECLARED → TRACKED → LIVE → GOVERNED)' },
+        { service: 'Health endpoint census', what: '46 services have no health_path defined — add /health to each so Fleet shows live status dots', status: '📋 Planned', blocking: 'Fleet live status' },
+      ]
+    },
+    {
+      level: 'P2 — Soon',
+      color: 'var(--cyan)',
+      bg: 'rgba(6,182,212,.1)',
+      border: 'rgba(6,182,212,.3)',
+      items: [
+        { service: 'Fleet cron reader', what: 'Cron that reads agentcard.yml from each repo, enriches from git + live API, stamps finished cards', status: '📋 Planned', blocking: 'Automated card updates without manual edits' },
+        { service: 'Network topology live data', what: 'Enrich /api/fleet with live status from /api/status cache — color-code cards by UP/DOWN', status: '📋 Planned', blocking: 'Real-time fleet health' },
+      ]
+    },
+    {
+      level: 'P3 — Backlog',
+      color: 'var(--muted)',
+      bg: 'rgba(100,116,139,.1)',
+      border: 'rgba(100,116,139,.3)',
+      items: [
+        { service: 'Methodology enforcement', what: 'Reader checks: secrets scan, CI gate, deny_self_edit — flips "governed" seal on cards', status: '💡 Idea', blocking: 'Trust verification layer' },
+        { service: 'Fleet export', what: 'Export all agent cards as a single PDF / static HTML for sharing with investors or team', status: '💡 Idea', blocking: 'Shareable fleet overview' },
+      ]
+    },
+  ];
+
+  priorityEl.innerHTML = PRIORITIES.map(p => `
+    <div style="background:var(--surface);border:1px solid ${p.border};border-radius:10px;padding:14px;margin-bottom:12px">
+      <div style="font-size:11px;font-weight:700;color:${p.color};text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">${p.level}</div>
+      ${p.items.map(item => `
+        <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--border)">
+          <div style="font-weight:600;font-size:12px;color:var(--text);margin-bottom:3px">${item.service}</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${item.what}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <span style="font-size:10px;color:${p.color}">${item.status}</span>
+            <span style="font-size:10px;color:#334155">Unlocks: ${item.blocking}</span>
+          </div>
+        </div>`).join('')}
+    </div>`).join('');
 }
 </script>
 </body>
