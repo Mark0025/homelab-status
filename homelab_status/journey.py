@@ -24,6 +24,27 @@ from .db import _conn, init_db
 
 JOURNEY_JSON = Path(__file__).parent.parent / "data" / "journey_v1.json"
 
+# Default ElevenLabs voice for the interviewer (overridable per persona below).
+DEFAULT_INTERVIEWER_VOICE_ID = "JnLbZVB3BDIX9KH4Bc1H"
+
+
+def load_env_key(key_name: str) -> str:
+    """Read a key from the environment, falling back to the project-root .env file."""
+    import os
+
+    val = os.environ.get(key_name, "")
+    if val:
+        return val
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith(f"{key_name}="):
+                v = line.split("=", 1)[1].strip()
+                if v:
+                    return v
+    return ""
+
 CHAPTER_TITLES = {
     "collecting_era":     "The Collecting Era",
     "learning_era":       "The Learning Era",
@@ -625,6 +646,231 @@ def refresh_all_deps() -> dict:
                 )
                 updated += 1
     return {"updated": updated}
+
+
+# Each persona carries an interview "style" (used to generate questions) and an
+# ElevenLabs "voice_id" (used to voice the interviewer during playback).
+PERSONA_STYLES = {
+    "gary_vee": {
+        "style": (
+            "Gary Vaynerchuk (Gary Vee) interview style. "
+            "Short, punchy, direct questions. "
+            "Heavy on hustle, accountability, self-awareness. "
+            "Calls out BS gently. Uses 'bro', 'look', 'the truth is', 'let me ask you something'. "
+            "Pushes on whether the person is being honest with themselves. "
+            "No fluff — gets to the real human behind the tech."
+        ),
+        "voice_id": DEFAULT_INTERVIEWER_VOICE_ID,
+    },
+    "lex_fridman": {
+        "style": (
+            "Lex Fridman interview style. "
+            "Long-form, philosophical, curious. "
+            "Asks about consciousness, meaning, first principles. "
+            "Respectful, slow-paced, often rephrases the question more deeply. "
+            "Finds the big idea inside a technical detail."
+        ),
+        "voice_id": DEFAULT_INTERVIEWER_VOICE_ID,
+    },
+    "tim_ferriss": {
+        "style": (
+            "Tim Ferriss interview style. "
+            "Tactical, process-oriented, deconstruction. "
+            "Asks 'what does your morning routine look like?', 'what was the decision that changed everything?'. "
+            "Pushes on failures and what was learned. "
+            "Numbers and specifics — not feelings."
+        ),
+        "voice_id": DEFAULT_INTERVIEWER_VOICE_ID,
+    },
+}
+
+
+def persona_style(persona_name: str) -> str:
+    """Return the interview-style prompt for a persona, or a sensible default."""
+    entry = PERSONA_STYLES.get(persona_name)
+    if entry:
+        return entry["style"]
+    return f"interviewer named {persona_name}"
+
+
+def persona_voice_id(persona_name: str) -> str:
+    """Return the ElevenLabs voice_id for a persona, falling back to the default voice."""
+    entry = PERSONA_STYLES.get(persona_name)
+    if entry and entry.get("voice_id"):
+        return entry["voice_id"]
+    return DEFAULT_INTERVIEWER_VOICE_ID
+
+
+def elevenlabs_tts(text: str, voice_id: str | None = None) -> bytes:
+    """
+    Synthesize `text` to speech via the ElevenLabs API and return raw MP3 bytes.
+
+    Raises RuntimeError with a human-readable message on missing key or API error.
+    """
+    import httpx
+
+    api_key = load_env_key("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY not set — add it to .env in the project root")
+
+    vid = voice_id or DEFAULT_INTERVIEWER_VOICE_ID
+    resp = httpx.post(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{vid}",
+        headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+        },
+        timeout=60,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"ElevenLabs API {resp.status_code}: {resp.text[:200]}")
+    return resp.content
+
+
+def generate_persona_questions(episode_id: int, persona_name: str) -> dict:
+    """
+    Use Claude to rewrite the default questions for an episode in a specific interviewer style.
+    Saves results as a new persona. Returns {persona, questions_count, persona_style}.
+    """
+    init_db()
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT e.id, r.repo, r.org, r.description, r.total_commits,
+                      r.first_commit_date, r.first_commit_msg, r.language
+               FROM journey_episodes e
+               JOIN journey_repos r ON r.id = e.repo_id
+               WHERE e.id=?""",
+            (episode_id,),
+        ).fetchone()
+
+    if not row:
+        return {"error": "episode not found"}
+
+    default_qs = get_episode_questions(episode_id, persona="default")
+    if not default_qs:
+        return {"error": "no default questions to restyle"}
+
+    style = persona_style(persona_name)
+
+    questions_block = "\n".join(
+        f"{i+1}. [{q['question_type']}] {q['question_text']}"
+        for i, q in enumerate(default_qs)
+    )
+
+    prompt = (
+        f"You are a writing assistant rewriting interview questions in a specific style.\n\n"
+        f"REPO CONTEXT:\n"
+        f"- Repo: {row['org']}/{row['repo']}\n"
+        f"- Description: {row['description'] or 'no description'}\n"
+        f"- Commits: {row['total_commits']}\n"
+        f"- First commit: {(row['first_commit_date'] or '')[:10]} — \"{row['first_commit_msg'] or ''}\"\n"
+        f"- Language: {row['language'] or 'unknown'}\n\n"
+        f"INTERVIEWER STYLE:\n{style}\n\n"
+        f"ORIGINAL QUESTIONS (keep the same quantity and same question_type tags):\n{questions_block}\n\n"
+        f"Rewrite each question in the interviewer's voice. "
+        f"Keep the same information intent but transform the phrasing completely. "
+        f"Return ONLY a JSON array of objects: "
+        f'[{{"seq":1,"question_type":"origin","question_text":"..."}},...]\n'
+        f"No extra text, no markdown fences."
+    )
+
+    import urllib.request as _req
+
+    api_key = load_env_key("OPENROUTER_API_KEY")
+    if not api_key:
+        return {"error": "OPENROUTER_API_KEY not set — add it to .env in the project root"}
+
+    payload = json.dumps({
+        "model": "anthropic/claude-haiku-4-5",
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    request = _req.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://homelab-status.local",
+        },
+    )
+    with _req.urlopen(request, timeout=60) as resp:
+        result = json.loads(resp.read())
+    raw = result["choices"][0]["message"]["content"].strip()
+    # Strip markdown code fences if model wrapped the JSON
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+    import json as _json
+    try:
+        rewritten = _json.loads(raw)
+    except Exception:
+        return {"error": f"Failed to parse Claude response: {raw[:200]}"}
+
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM journey_questions WHERE episode_id=? AND persona=?",
+            (episode_id, persona_name),
+        ).fetchone()[0]
+        if existing:
+            conn.execute(
+                "DELETE FROM journey_questions WHERE episode_id=? AND persona=? AND is_edited=0",
+                (episode_id, persona_name),
+            )
+
+        conn.executemany(
+            """INSERT INTO journey_questions
+               (episode_id, seq, question_text, question_type, data_source, data_ref, persona, is_edited)
+               VALUES (?,?,?,?,?,?,?,0)""",
+            [
+                (episode_id, q.get("seq", i+1), q["question_text"], q.get("question_type", "general"),
+                 "ai_persona", persona_name, persona_name)
+                for i, q in enumerate(rewritten)
+            ],
+        )
+
+    return {"persona": persona_name, "questions_count": len(rewritten), "style": style[:80]}
+
+
+def get_episode_script(episode_id: int, persona: str = "default") -> dict:
+    """
+    Return a formatted Q+A script for an episode — all questions + answers in dialogue format.
+    Omits unanswered questions.
+    """
+    init_db()
+    with _conn() as conn:
+        ep = conn.execute(
+            "SELECT e.title, r.repo FROM journey_episodes e JOIN journey_repos r ON r.id=e.repo_id WHERE e.id=?",
+            (episode_id,),
+        ).fetchone()
+
+    if not ep:
+        return {"error": "episode not found"}
+
+    qs = get_episode_questions(episode_id, persona=persona)
+    lines = []
+    for q in qs:
+        lines.append({
+            "speaker": "interviewer",
+            "text": q["question_text"],
+            "type": q.get("question_type", "general"),
+        })
+        if q.get("answer_text"):
+            lines.append({
+                "speaker": "mark",
+                "text": q["answer_text"],
+            })
+
+    return {
+        "episode_id": episode_id,
+        "title": ep["repo"] if ep else "",
+        "persona": persona,
+        "lines": lines,
+        "answered_count": sum(1 for q in qs if q.get("answer_text")),
+        "total_questions": len(qs),
+    }
 
 
 def get_episode_deps(episode_id: int) -> dict:
