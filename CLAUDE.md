@@ -55,12 +55,37 @@ When you need live infra truth, in order of preference:
 
 See memory `homelab-status-knowledge-sources` for the full source map.
 
-## Workflow discipline (from Mark's global rules)
+## Git workflow + CI/CD — the conveyor belt (enforced by config, not honor system)
 
-- **Branch** `type/N-description` from main; **commit** `prefix: description (#N)`; **squash-merge** PR with tests checkbox + issue ref.
-- **One issue per PR.** End commit messages with the `Co-Authored-By: Claude Opus 4.8 (1M context)` trailer.
+> A change travels six stations from your edit to a running container on Hetzner. Each station is a LEGO step (manual → brick → house). **Verify live state with `gh api`, don't trust this prose** (principle 1) — but this is what was configured as of 2026-06-18.
+
+```
+EDIT ─► [1] branch ─► [2] PR build gate ─► [3] main protection ─► [4] build+push ─► [5] MANUAL deploy ─► [6] running
+        (photocopy)   (CI: pull_request)   (squash-only, no       (CI: push:main,   (ssh homelab,        (uvicorn :8800,
+                       builds, no push)     direct push, no force) ships :latest)    docker compose pull) nginx-network)
+```
+
+1. **Branch** `type/N-description` off `main`. Never edit `main` directly.
+2. **PR build gate** — `.github/workflows/docker.yml` job `build` runs on `pull_request`: it `docker build`s the image with `push: false` to **prove it still builds**, then discards it. Red here = blocked merge (`build` is a required status check). This is "test that what we did doesn't break" — see the gap note below.
+3. **`main` is protected** (live config, verify with `gh api repos/Mark0025/homelab-status/branches/main/protection`): PR required (0 reviewers, solo), required check `build`, **no force-push, no deletion**, and **merge-commits are DISABLED at the repo** so the only merge button is **Squash** (rebase kept as a rare escape hatch). `enforce_admins:false` = **Mark may override for a true hotfix; an AI agent must NEVER** (same boundary as Terry → `autonomous-work` only, and Adam → can't push at all).
+4. **Build + push** — job `build-and-push` runs only on `push: main` (after merge) and ships `ghcr.io/mark0025/homelab-status:latest` (+ `sha-` tag) to GHCR. Inspection (step 2) and deploy (step 4) are deliberately separate jobs.
+5. **⚠️ Deploy to Hetzner is MANUAL.** Nothing auto-pulls the image — there is no Watchtower/webhook in this repo (tracked: #19). `docker-compose.yml` pins `:latest`, so the running container stays on the OLD image until someone runs `ssh homelab` → `docker compose pull homelab-status && docker compose up -d`. "Push to Hetzner" really means "push to GHCR, then deploy." (LEGO rule: server PULLs + RUNs, never builds.)
+6. **Running** — container `homelab-status` on `nginx-network` (NPM is the HTTPS doorman = *runtime* layer, NOT the Git gate — principle 2). `/data` volume persists `status.db`; it **read-only-mounts** `mdops-mac.db` from `/home/mark/00Myhomelab/...` (it CONSUMES another system's data; see "connected apps" below).
+
+### Commit / PR conventions
+- **One issue per PR.** `commit: prefix: description (#N)`. The squash-commit **body** = one bullet per logical change (the `.github/pull_request_template.md` + `.gitmessage` prefill this) — that body is `main`'s durable history; the PR page keeps every original commit forever.
+- End commit messages with the `Co-Authored-By: Claude Opus 4.8 (1M context)` trailer.
 - Run `/simplify` before committing; `/code-review` for bug-hunting.
-- **Docs vs build:** epics #13/#14 are currently **design docs, not implemented.** When you start building, the first piece is #14's diagram-server/NPM wire-in to replace `services.py`. Don't claim a layer is built until it is.
+
+### Known gaps (do NOT assume these are handled)
+- **No unit tests** (#18). The `build` gate proves the image *compiles*, not that it *works*. Global rule "no endpoint without a test" is currently violated here — adding `uv run pytest` to the gate is the next hardening.
+- **No auto-deploy** to Hetzner (#19) — step 5 is manual.
+
+### Connected apps (blast radius)
+- **Reads** `mdops-mac.db` (written by the MDDPY/Terry system) via read-only mount.
+- **Will read** the diagram server `/api/unified/*` + NPM `:81` once EPIC #14 replaces `services.py` (unbuilt).
+- **Pulls** the GitHub API (3 orgs) → writes only its own `status.db`. Writes to no other app — low blast radius, which is why it's a safe repo to perfect this CI/CD discipline first.
+- **Docs vs build:** epics #13/#14 are **design docs, not implemented.** First build = #14's diagram/NPM wire-in to replace `services.py`. Don't claim a layer is built until it is.
 
 ## When uncertain
 
