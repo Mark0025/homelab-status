@@ -1,12 +1,36 @@
 name: Build and Push Docker Image
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
 
 jobs:
+  # PR gate: build the image to prove it compiles, but do NOT push.
+  # This is the check required by branch protection on main.
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ghcr.io/mark0025/homelab-status:pr-${{ github.event.pull_request.number }}
+
+  # Deploy: only after merge to main — build and push to ghcr.io (unchanged behavior).
   build-and-push:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
