@@ -1,0 +1,13 @@
+# <type>: <subject> (#<issue>)        ← 50 chars, imperative. type = feat|fix|chore|docs|refactor|test
+#
+# Closes #<issue>.
+#
+# Body — preserve the granular history that squash collapses.
+# One bullet per logical change that was on this branch:
+# - <what changed and why>
+# - <what changed and why>
+#
+# This body is the durable record in main's log. The PR page keeps every
+# original commit + SHA forever; this keeps the *summary* of them in git itself.
+#
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
