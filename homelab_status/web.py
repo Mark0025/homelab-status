@@ -28,7 +28,8 @@ from .journey import (
     get_chapters, get_episodes, get_episode_questions, get_journey_stats,
     scaffold_episodes, update_episode, save_answer, update_question,
     get_personas, clone_questions_for_persona, refresh_all_deps, scan_repo_deps,
-    get_episode_deps,
+    get_episode_deps, generate_persona_questions, get_episode_script, PERSONA_STYLES,
+    elevenlabs_tts, persona_voice_id, load_env_key,
 )
 from .enricher import enrich_all_episodes, enrich_one_episode
 
@@ -416,6 +417,96 @@ async def journey_refresh_deps():
     return JSONResponse(result)
 
 
+@api.post("/api/journey/episode/{episode_id}/persona/generate")
+async def journey_generate_persona(episode_id: int, payload: dict):
+    """
+    Use Claude to rewrite questions in a named interviewer style.
+    payload: {name: "gary_vee"} — name must be in PERSONA_STYLES or any custom string.
+    """
+    name = payload.get("name", "").strip().lower().replace(" ", "_")
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, generate_persona_questions, episode_id, name)
+    return JSONResponse(result)
+
+
+@api.get("/api/journey/personas")
+async def journey_list_personas():
+    """List built-in AI persona styles."""
+    return JSONResponse({"personas": list(PERSONA_STYLES.keys())})
+
+
+@api.get("/api/journey/episode/{episode_id}/script")
+async def journey_episode_script(episode_id: int, persona: str = Query("default")):
+    """Return Q+A script for an episode in dialogue format."""
+    return JSONResponse(get_episode_script(episode_id, persona=persona))
+
+
+@api.get("/api/journey/tts/status")
+async def journey_tts_status():
+    """Report whether the ElevenLabs voice engine is configured (API key present)."""
+    has_key = bool(load_env_key("ELEVENLABS_API_KEY"))
+    return JSONResponse({
+        "available": has_key,
+        "engine": "elevenlabs",
+        "error": None if has_key else "ELEVENLABS_API_KEY not set in .env",
+    })
+
+
+@api.get("/api/journey/episode/{episode_id}/tts-stream")
+async def journey_tts_stream(episode_id: int, persona: str = Query("default")):
+    """
+    SSE stream — voices the interviewer's lines via ElevenLabs, one clip at a time,
+    so the browser plays them as they finish. Mark is the guest and speaks live, so
+    his lines are not synthesized.
+
+    Each event is JSON: {speaker, text, audio_b64, content_type} or {error} or {done}.
+    """
+    import base64 as _b64, json as _json
+    import anyio
+    from fastapi.responses import StreamingResponse
+
+    script = get_episode_script(episode_id, persona=persona)
+    if script.get("error"):
+        async def _err():
+            yield f"data: {_json.dumps({'error': script['error']})}\n\n"
+        return StreamingResponse(_err(), media_type="text/event-stream")
+
+    if not load_env_key("ELEVENLABS_API_KEY"):
+        async def _nokey():
+            yield f"data: {_json.dumps({'error': 'ELEVENLABS_API_KEY not set in .env'})}\n\n"
+            yield f"data: {_json.dumps({'done': True})}\n\n"
+        return StreamingResponse(_nokey(), media_type="text/event-stream")
+
+    voice_id = persona_voice_id(persona)
+
+    async def _generate():
+        for idx, line in enumerate(script.get("lines", [])):
+            text = line.get("text")
+            speaker = line.get("speaker", "interviewer")
+            # Only the interviewer is voiced — Mark (guest) speaks live.
+            if speaker != "interviewer" or not text:
+                continue
+            try:
+                audio = await anyio.to_thread.run_sync(elevenlabs_tts, text, voice_id)
+                event = {
+                    "idx": idx,
+                    "speaker": speaker,
+                    "text": text[:120],
+                    "audio_b64": _b64.b64encode(audio).decode(),
+                    "content_type": "audio/mpeg",
+                }
+            except Exception as e:
+                event = {"idx": idx, "speaker": speaker, "text": text[:120], "error": str(e)}
+            yield f"data: {_json.dumps(event)}\n\n"
+
+        yield f"data: {_json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(_generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @api.get("/", response_class=HTMLResponse)
 async def dashboard():
     if not _cache["results"]:
@@ -797,6 +888,21 @@ _HTML = """<!DOCTYPE html>
       <div style="color:var(--muted);font-size:13px">← Select an episode to see its interview questions.</div>
     </div>
 
+  </div>
+</div>
+
+<!-- SCRIPT PREVIEW MODAL -->
+<div id="script-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:200;overflow-y:auto;padding:40px 20px">
+  <div style="max-width:760px;margin:0 auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div>
+        <h2 id="script-modal-title" style="font-size:16px;font-weight:700;color:var(--text)">Interview Script</h2>
+        <div id="script-modal-sub" style="font-size:11px;color:var(--muted);margin-top:2px"></div>
+      </div>
+      <button onclick="closeScriptModal()"
+        style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;line-height:1">✕</button>
+    </div>
+    <div id="script-modal-body" style="font-size:13px;line-height:1.7"></div>
   </div>
 </div>
 
@@ -1950,12 +2056,24 @@ async function loadJourneyEpisode(id, persona) {
       <span style="font-size:10px;color:var(--muted);font-weight:600">PERSONA:</span>
       ${personaTabs}
       <button onclick="showCreatePersona(${id})"
-        style="background:none;border:1px dashed var(--border);color:var(--muted);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px">+ New</button>
-      <div id="new-persona-form-${id}" style="display:none;display:none">
+        style="background:none;border:1px dashed var(--border);color:var(--muted);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px">+ Custom</button>
+      <button id="gen-persona-btn-${id}" onclick="showGeneratePersona(${id})"
+        style="background:rgba(168,85,247,0.15);border:1px solid #a855f755;color:#a855f7;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px">🤖 AI Style</button>
+      <div id="new-persona-form-${id}" style="display:none">
         <input id="new-persona-name-${id}" placeholder="e.g. technical_deep_dive"
           style="background:var(--surface);border:1px solid var(--blue);border-radius:4px;padding:3px 8px;font-size:11px;color:var(--text);width:160px">
         <button onclick="createPersona(${id})"
           style="background:var(--blue);border:none;color:#fff;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;margin-left:4px">Create</button>
+      </div>
+      <div id="gen-persona-form-${id}" style="display:none;display:flex;gap:6px;align-items:center">
+        <select id="gen-persona-style-${id}"
+          style="background:var(--surface);border:1px solid var(--purple);border-radius:4px;padding:3px 8px;font-size:11px;color:var(--text)">
+          <option value="gary_vee">Gary Vee</option>
+          <option value="lex_fridman">Lex Fridman</option>
+          <option value="tim_ferriss">Tim Ferriss</option>
+        </select>
+        <button id="gen-persona-go-${id}" onclick="generatePersona(${id})"
+          style="background:var(--purple);border:none;color:#fff;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px">Generate</button>
       </div>
     </div>
 
@@ -1971,6 +2089,8 @@ async function loadJourneyEpisode(id, persona) {
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button id="deep-dive-btn-${id}" onclick="deepDiveEpisode(${id})"
         style="background:var(--purple);border:none;color:#fff;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">🔍 Deep Dive</button>
+      <button onclick="previewScript(${id})"
+        style="background:var(--cyan);border:none;color:#000;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">📄 Script</button>
       <span style="font-size:10px;color:var(--muted)">Status:</span>
       <button onclick="cycleEpisodeStatus(${id},'draft')"
         style="background:var(--surface2);border:1px solid ${STATUS_COLOR['draft']||'#64748b'}55;color:${STATUS_COLOR['draft']||'#64748b'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px">📝 Draft</button>
@@ -2026,7 +2146,37 @@ async function saveEditQuestion(qid) {
 
 function showCreatePersona(epId) {
   const form = document.getElementById(`new-persona-form-${epId}`);
-  form.style.display = form.style.display === 'none' ? '' : 'none';
+  form.style.display = form.style.display === 'none' ? 'flex' : 'none';
+  document.getElementById(`gen-persona-form-${epId}`).style.display = 'none';
+}
+
+function showGeneratePersona(epId) {
+  const form = document.getElementById(`gen-persona-form-${epId}`);
+  form.style.display = form.style.display === 'none' ? 'flex' : 'none';
+  document.getElementById(`new-persona-form-${epId}`).style.display = 'none';
+}
+
+async function generatePersona(epId) {
+  const sel = document.getElementById(`gen-persona-style-${epId}`);
+  const name = sel.value;
+  const btn = document.getElementById(`gen-persona-go-${epId}`);
+  btn.textContent = '⏳ Generating…';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/journey/episode/${epId}/persona/generate`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({name}),
+    });
+    const data = await res.json();
+    if (data.error) { alert('Error: ' + data.error); return; }
+    document.getElementById(`gen-persona-form-${epId}`).style.display = 'none';
+    await loadJourneyEpisode(epId, name);
+  } catch(e) {
+    alert('Generate failed: ' + e.message);
+  } finally {
+    btn.textContent = 'Generate';
+    btn.disabled = false;
+  }
 }
 
 async function createPersona(epId) {
@@ -2085,6 +2235,106 @@ async function markAnswered(qid) {
     body:JSON.stringify({answer_text: ans})
   });
   if (_currentEpisodeId) await loadJourneyEpisode(_currentEpisodeId, _currentPersona);
+}
+
+let _ttsStatus = null;
+
+async function checkTtsStatus() {
+  const data = await fetch('/api/journey/tts/status').then(r=>r.json());
+  _ttsStatus = data;
+  return data;
+}
+
+async function previewScript(epId) {
+  const persona = _currentPersona || 'default';
+  const modal = document.getElementById('script-modal');
+  const body = document.getElementById('script-modal-body');
+  const title = document.getElementById('script-modal-title');
+  const sub = document.getElementById('script-modal-sub');
+  body.innerHTML = '<div style="color:var(--muted)">Loading script…</div>';
+  modal.style.display = '';
+
+  const [data, ttsData] = await Promise.all([
+    fetch(`/api/journey/episode/${epId}/script?persona=${persona}`).then(r=>r.json()),
+    checkTtsStatus(),
+  ]);
+
+  if (data.error) { body.innerHTML = `<div style="color:var(--red)">${escHtml(data.error)}</div>`; return; }
+
+  title.textContent = data.title || 'Interview Script';
+  sub.textContent = `Persona: ${data.persona} · ${data.answered_count}/${data.total_questions} questions answered`;
+
+  const SPEAKER_COLOR = {interviewer: 'var(--purple)', mark: 'var(--cyan)'};
+  const SPEAKER_LABEL = {interviewer: '🎙️ Interviewer', mark: '💬 Mark'};
+
+  const ttsBar = ttsData.available
+    ? `<div style="margin-bottom:16px;padding:10px 14px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:6px;display:flex;align-items:center;gap:10px">
+        <span style="color:var(--green)">🔊 ElevenLabs ready — interviewer voiced, you speak live</span>
+        <button id="gen-audio-btn-${epId}" onclick="generateAudio(${epId})"
+          style="background:var(--green);border:none;color:#000;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:12px;font-weight:600;margin-left:auto">
+          🎙️ Generate Audio
+        </button>
+       </div>`
+    : `<div style="margin-bottom:16px;padding:10px 14px;background:rgba(100,116,139,0.1);border:1px solid var(--border);border-radius:6px">
+        <span style="color:var(--muted)">🔇 ElevenLabs not configured — add <code>ELEVENLABS_API_KEY</code> to .env</span>
+       </div>`;
+
+  const lines = (data.lines || []).map((l,i) => {
+    const color = SPEAKER_COLOR[l.speaker] || 'var(--text)';
+    const label = SPEAKER_LABEL[l.speaker] || l.speaker;
+    const typeTag = l.type ? `<span style="font-size:10px;color:var(--muted);margin-left:6px">[${l.type}]</span>` : '';
+    return `<div id="script-line-${epId}-${i}" style="margin-bottom:16px">
+      <div style="font-size:10px;font-weight:700;color:${color};text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">${label}${typeTag}</div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px 14px;border-left:3px solid ${color}">${escHtml(l.text)}</div>
+      <div id="audio-${epId}-${i}" style="margin-top:4px"></div>
+    </div>`;
+  }).join('');
+
+  body.innerHTML = ttsBar + (lines || '<div style="color:var(--muted)">No answered questions yet.</div>');
+  body.dataset.epId = epId;
+  body.dataset.persona = persona;
+}
+
+function generateAudio(epId) {
+  const btn = document.getElementById(`gen-audio-btn-${epId}`);
+  if (btn) { btn.textContent = '⏳ Generating…'; btn.disabled = true; }
+
+  const persona = _currentPersona || 'default';
+  const es = new EventSource(`/api/journey/episode/${epId}/tts-stream?persona=${persona}`);
+
+  es.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.done) {
+      es.close();
+      if (btn) { btn.textContent = '🎙️ Generate Audio'; btn.disabled = false; }
+      return;
+    }
+    if (data.error && data.idx === undefined) {
+      // Stream-level error (no key, bad episode) — abort.
+      es.close();
+      if (btn) { btn.textContent = '🎙️ Generate Audio'; btn.disabled = false; }
+      alert('TTS error: ' + data.error);
+      return;
+    }
+    // Target the exact line the server voiced (only interviewer lines stream back).
+    const el = document.getElementById(`audio-${epId}-${data.idx}`);
+    if (!el) return;
+    if (data.audio_b64) {
+      const src = `data:${data.content_type};base64,${data.audio_b64}`;
+      el.innerHTML = `<audio controls autoplay src="${src}" style="width:100%;height:32px;margin-top:4px"></audio>`;
+    } else if (data.error) {
+      el.innerHTML = `<span style="font-size:10px;color:var(--red)">${escHtml(data.error)}</span>`;
+    }
+  };
+
+  es.onerror = () => {
+    es.close();
+    if (btn) { btn.textContent = '🎙️ Generate Audio'; btn.disabled = false; }
+  };
+}
+
+function closeScriptModal() {
+  document.getElementById('script-modal').style.display = 'none';
 }
 </script>
 </body>
