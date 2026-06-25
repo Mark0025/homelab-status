@@ -26,12 +26,39 @@ def _token_from_gh_cli() -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return ""
 
-GITHUB_TOKEN = (
-    os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    or os.environ.get("GH_TOKEN")
-    or _token_from_gh_cli()
-)
+def _resolve_token() -> str:
+    """Resolve a GitHub token from env or the gh CLI. Empty string = none found."""
+    return (
+        os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or _token_from_gh_cli()
+        or ""
+    ).strip()
 
+
+GITHUB_TOKEN = _resolve_token()
+
+# Resolved lazily in _gh_get so a token set after import (or in tests) is picked up,
+# and so an EMPTY token fails loudly instead of sending `Authorization: Bearer ` —
+# which GitHub rejects as an "Illegal header value" and the caller silently swallows,
+# leaving every repo stuck at its last-known commit count. (Issue #20.)
+def _github_headers() -> dict:
+    token = _resolve_token()
+    if not token:
+        raise RuntimeError(
+            "No GitHub token: set GITHUB_PERSONAL_ACCESS_TOKEN (or GH_TOKEN), "
+            "or run `gh auth login`. Without it, commit ingestion fetches 0 and "
+            "profiles silently go stale (issue #20). Check the running container's "
+            "env — a wrong deploy directory can ship an empty token."
+        )
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+# Back-compat for any caller importing the constant directly.
 GITHUB_HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Accept": "application/vnd.github+json",
@@ -179,7 +206,7 @@ def _repos_need_refresh() -> bool:
 
 async def _gh_get(client: httpx.AsyncClient, url: str, params: dict | None = None) -> list | dict | None:
     try:
-        resp = await client.get(url, headers=GITHUB_HEADERS, params=params, timeout=15.0)
+        resp = await client.get(url, headers=_github_headers(), params=params, timeout=15.0)
         if resp.status_code == 200:
             return resp.json()
         logger.warning(f"GitHub API {url} → {resp.status_code}")
@@ -259,6 +286,15 @@ _refresh_running = False
 async def refresh_all(force: bool = False) -> dict:
     """Fetch all repos + recent commits. Safe to call from background task."""
     global _refresh_running
+    # Fail loud BEFORE doing any work: a missing token makes every fetch return 0
+    # and profiles silently go stale (issue #20). Surface it instead of swallowing.
+    if not _resolve_token():
+        logger.error(
+            "git refresh aborted: no GitHub token resolved. Set "
+            "GITHUB_PERSONAL_ACCESS_TOKEN / GH_TOKEN, or `gh auth login`. "
+            "Check the running container's env (wrong deploy dir = empty token)."
+        )
+        return {"status": "error", "error": "no_github_token", "commits_saved": 0}
     if _refresh_running and not force:
         return {"status": "already_running"}
 
