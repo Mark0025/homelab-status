@@ -23,7 +23,7 @@ from .timeline import (
 )
 from .project_intel import (
     enrich_commits_with_agents, get_agent_stats, get_all_profiles,
-    get_project_profile, extract_fix_patterns, search_profiles,
+    get_project_profile, extract_fix_patterns, detect_refixes, search_profiles,
     refresh_all_profiles, _profile_running as _intel_running,
 )
 from .services import CATEGORY_LABELS, SERVICES
@@ -277,6 +277,13 @@ async def intel_profile(owner: str, repo: str):
 async def intel_fixes(repo: str | None = Query(None), limit: int = Query(100)):
     fixes = extract_fix_patterns(repo=repo)
     return JSONResponse({"total": len(fixes), "fixes": fixes[:limit]})
+
+
+@api.get("/api/intel/refixes")
+async def intel_refixes(repo: str | None = Query(None), limit: int = Query(100)):
+    """Re-fixes (#13 Layer A): fix pairs where the earlier fix didn't hold."""
+    refixes = detect_refixes(repo=repo)
+    return JSONResponse({"total": len(refixes), "refixes": refixes[:limit]})
 
 
 @api.post("/api/intel/refresh")
