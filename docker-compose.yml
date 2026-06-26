@@ -9,6 +9,14 @@ services:
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PERSONAL_ACCESS_TOKEN}
       - STATUS_DB_PATH=/data/status.db
       - MDOPS_DB_PATH=/data/mdops-mac.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Cap logs so one chatty container can't fill the host disk (LEGO rule;
+    # voice-app filled 114GB once). Issue #22.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     volumes:
       - homelab_status_data:/data
       - /home/mark/00Myhomelab/MDDPY-MAC-GLOBAL/data-mac/mdops-mac.db:/data/mdops-mac.db:ro

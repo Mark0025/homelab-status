@@ -32,6 +32,11 @@ from .journey import (
     elevenlabs_tts, persona_voice_id, load_env_key,
 )
 from .enricher import enrich_all_episodes, enrich_one_episode
+from .logging_config import configure_logging
+
+# Configure logging at import time so the uvicorn container gets a structured,
+# level-controlled loguru sink (not loguru's unconfigured default). Issue #22.
+configure_logging()
 
 api = FastAPI(title="Homelab Status", docs_url=None, redoc_url=None)
 
