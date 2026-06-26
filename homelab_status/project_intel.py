@@ -353,6 +353,104 @@ async def _path_exists(
     return data is not None
 
 
+# ── Code audit (#13) — read the REAL code, not metadata ──────────────────────
+# Every prior layer inferred from commit messages / counts. This reads the
+# ACTUAL source via the existing _fetch_file_content: real dependencies (what the
+# repo TRULY uses) and real API routes (what it TRULY exposes). Ground truth for
+# "the plan claimed X — is X actually in the code?". Reuses existing tools only.
+
+def _parse_python_deps(text: str) -> list[str]:
+    """Real Python deps. For pyproject, ONLY the dependencies arrays (not TOML
+    keys); for requirements.txt, the package lines."""
+    names: set[str] = set()
+    # pyproject: capture quoted entries inside `dependencies = [...]` blocks only
+    for block in re.findall(r'dependencies\s*=\s*\[(.*?)\]', text, re.S):
+        for m in re.findall(r'["\']([a-zA-Z0-9][a-zA-Z0-9._-]+)\s*[>=<~!\[;"\' ]', block):
+            names.add(m.lower())
+    # optional-dependencies / dependency-groups blocks
+    for m in re.findall(r'["\']([a-zA-Z0-9][a-zA-Z0-9._-]+)["\']\s*[>=<~]', text):
+        # only if it looks like a version pin follows (real dep), handled above mostly
+        pass
+    # requirements.txt style (no [tool] / no '=' assignment lines)
+    if "dependencies = [" not in text and "[tool" not in text:
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith(("#", "-", "[")) and re.match(r"^[a-zA-Z0-9]", line):
+                names.add(re.split(r"[>=<~!\[; ]", line)[0].lower())
+    return sorted(n for n in names if len(n) > 1)
+
+
+def _parse_npm_deps(text: str) -> list[str]:
+    try:
+        d = json.loads(text)
+        return sorted(set(list(d.get("dependencies", {})) + list(d.get("devDependencies", {}))))
+    except Exception:
+        return []
+
+
+def _extract_routes_from_source(text: str) -> list[str]:
+    """Real HTTP routes declared in source (FastAPI/Flask/Express patterns)."""
+    routes = set()
+    # FastAPI/Flask: @app.get("/x"), @router.post("/y")
+    for m in re.finditer(r'@\w+\.(get|post|put|patch|delete)\(\s*["\']([^"\']+)["\']', text):
+        routes.add(f"{m.group(1).upper()} {m.group(2)}")
+    # Express: app.get('/x'), router.post('/y')
+    for m in re.finditer(r'\.(get|post|put|patch|delete)\(\s*["\']([/][^"\']*)["\']', text):
+        routes.add(f"{m.group(1).upper()} {m.group(2)}")
+    return sorted(routes)
+
+
+async def code_audit(owner: str, repo: str) -> dict:
+    """Audit a repo by reading its REAL code (not commit metadata).
+
+    Returns ground truth: actual dependencies + actual API routes the source
+    declares. This is what 'the plan said X' should be checked against.
+    """
+    import httpx as _httpx
+    result: dict = {"owner": owner, "repo": repo, "deps": [], "dep_source": None,
+                    "routes": [], "route_sources": [], "manifests": []}
+    async with _httpx.AsyncClient() as client:
+        # --- real dependencies ---
+        pyproject = await _fetch_file_content(client, owner, repo, "pyproject.toml")
+        if pyproject:
+            result["deps"] = _parse_python_deps(pyproject)
+            result["dep_source"] = "pyproject.toml"
+            result["manifests"].append("pyproject.toml")
+        else:
+            reqs = await _fetch_file_content(client, owner, repo, "requirements.txt")
+            if reqs:
+                result["deps"] = _parse_python_deps(reqs)
+                result["dep_source"] = "requirements.txt"
+                result["manifests"].append("requirements.txt")
+        pkg = await _fetch_file_content(client, owner, repo, "package.json")
+        if pkg:
+            npm = _parse_npm_deps(pkg)
+            if npm:
+                result["deps"] = sorted(set(result["deps"]) | set(npm))
+                result["dep_source"] = (result["dep_source"] + "+package.json") if result["dep_source"] else "package.json"
+                result["manifests"].append("package.json")
+
+        # --- real API routes: probe common entrypoints AND nested package dirs ---
+        entrypoints = ["main.py", "app.py", "server.py", "web.py", "api.py",
+                       "src/index.js", "src/server.js", "index.js", "server.js"]
+        # discover top-level dirs so we can find nested entrypoints (e.g. pkg/web.py)
+        top = await _gh_get(client, f"https://api.github.com/repos/{owner}/{repo}/contents")
+        if isinstance(top, list):
+            dirs = [it["name"] for it in top if it.get("type") == "dir"][:8]
+            for d in dirs:
+                entrypoints += [f"{d}/web.py", f"{d}/main.py", f"{d}/app.py", f"{d}/api.py", f"{d}/server.js"]
+        routes: set[str] = set()
+        for path in entrypoints:
+            src = await _fetch_file_content(client, owner, repo, path)
+            if src:
+                found = _extract_routes_from_source(src)
+                if found:
+                    routes.update(found)
+                    result["route_sources"].append(path)
+        result["routes"] = sorted(routes)
+    return result
+
+
 # ── README / CLAUDE.md parsing ────────────────────────────────────────────────
 
 _LIMITATION_HEADERS_RE = re.compile(
