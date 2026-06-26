@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Homelab Status</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
@@ -26,6 +27,7 @@
   <div class="tab" onclick="showTab('git', this)">Git History <span id="git-count-badge" style="color:var(--green);font-size:11px"></span></div>
   <div class="tab" onclick="showTab('timeline', this)">Timeline &amp; Analytics</div>
   <div class="tab" onclick="showTab('intel', this)">Dev Intelligence</div>
+  <div class="tab" onclick="showTab('learnings', this)">Learnings 🧠 <span id="learnings-count-badge" style="color:var(--red);font-size:11px"></span></div>
   <div class="tab" onclick="showTab('plans', this)">Plans &amp; Docs <span id="plans-count-badge" style="color:var(--muted);font-size:11px"></span></div>
   <div class="tab" onclick="showTab('journey', this)">Journey 🎙️ <span id="journey-ep-badge" style="color:var(--purple);font-size:11px"></span></div>
 </div>
@@ -131,6 +133,19 @@
   <div id="intel-content">
     <div class="loading"><div class="spinner"></div><br>Loading intelligence...</div>
   </div>
+</div>
+
+<!-- LEARNINGS TAB (#13 Layer A) — re-fixes: where a fix didn't hold -->
+<div id="learnings-view" style="display:none;padding:16px 24px">
+  <div style="margin-bottom:12px">
+    <div style="font-size:14px;font-weight:700">🧠 Learnings — fixes that didn't hold</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:2px">
+      A <b>fix</b> followed by a similar <b>fix</b> in the same repo = the first one didn't hold.
+      <span style="color:var(--red)">red</span> = the re-fix, <span style="color:var(--purple)">purple</span> = verdict.
+    </div>
+  </div>
+  <div id="learnings-status" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+  <div id="learnings-mermaid" class="mermaid" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:auto"></div>
 </div>
 
 <!-- PLANS & DOCS TAB -->
