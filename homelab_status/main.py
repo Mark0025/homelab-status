@@ -1,12 +1,11 @@
 """Homelab status CLI."""
 
 import asyncio
-import sys
 from typing import Optional
 
 import typer
-from loguru import logger
 
+from .logging_config import configure_logging
 from .checker import check_all
 from .db import get_routes, get_topology, init_db, save_network_topology, save_routes, save_run
 from .git_history import get_commit_stats, get_recent_commits, get_repo_summaries, refresh_all
@@ -17,14 +16,8 @@ app = typer.Typer(help="Check the status of all homelab public endpoints.")
 
 
 def _configure_logging(verbose: bool) -> None:
-    logger.remove()
-    level = "DEBUG" if verbose else "INFO"
-    logger.add(
-        sys.stderr,
-        level=level,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
-        colorize=True,
-    )
+    # Shared config (issue #22) — verbose flag maps to DEBUG, else env/INFO.
+    configure_logging(level="DEBUG" if verbose else None, force=True)
 
 
 @app.command()
