@@ -26,7 +26,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .db import _conn, init_db
-from .git_history import GITHUB_HEADERS, _init_git_tables
+from .git_history import GITHUB_HEADERS, SKIP_REPOS, _init_git_tables
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -1183,6 +1183,104 @@ def extract_fix_patterns(repo: str | None = None) -> list[dict]:
 
 # Keep as alias for backwards-compat
 get_fix_patterns = extract_fix_patterns
+
+
+# ── Re-fix detection (#13 Layer A — the Learning Verdict) ────────────────────
+# The app lists every fix but never asks "did this fix relate to an earlier
+# fix?". A `fix:` commit followed by a SIMILAR `fix:` in the same repo means the
+# first fix didn't hold — a lesson that didn't stick. Pure derivation over data
+# we already have. Signal validated on real repos (2026-06-26): Jaccard >= 0.5
+# on significant words finds genuine re-fixes (pete-db API_URL, Aireinvestor
+# Stripe) and stays quiet where there's nothing (Twilio_tools, peterei_intercom).
+
+_REFIX_SIMILARITY = 0.5      # Jaccard threshold on significant words
+_REFIX_MAX_DAYS = 120       # only correlate fixes within this window
+_STOPWORDS = {"with", "from", "that", "this", "when", "into", "your", "have",
+              "uses", "using", "have", "make", "update", "updates"}
+
+
+def _fix_keywords(message: str) -> set[str]:
+    """Significant words from a fix subject (first line), `fix:` prefix stripped."""
+    subject = (message or "").split("\n")[0].lower()
+    subject = re.sub(r"^fix(\([^)]*\))?:?\s*", "", subject)
+    subject = re.sub(r"[^a-z0-9 ]", " ", subject)
+    return {w for w in subject.split() if len(w) > 3 and w not in _STOPWORDS}
+
+
+def detect_refixes(repo: str | None = None, min_similarity: float = _REFIX_SIMILARITY) -> list[dict]:
+    """Find fix pairs in the same repo whose subjects are similar — the earlier
+    fix "didn't hold". Forks are excluded (SKIP_REPOS) so other people's fixes
+    don't drown the signal. Returns newest-re-fix-first.
+
+    Each result: {repo, owner, similarity, days_between,
+                  original:{sha,subject,date}, refix:{sha,subject,date}}
+    """
+    _init_intel_tables()
+    query = """
+        SELECT sha, repo, owner, message, author_date
+        FROM gh_commits
+        WHERE commit_type = 'fix' AND author_date != ''
+    """
+    params: list[Any] = []
+    if repo:
+        query += " AND repo = ?"
+        params.append(repo)
+    query += " ORDER BY repo, author_date"
+
+    with _conn() as conn:
+        rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    # group by repo, skipping forks/upstream noise
+    by_repo: dict[str, list[dict]] = {}
+    for r in rows:
+        if r["repo"] in SKIP_REPOS:
+            continue
+        by_repo.setdefault(r["repo"], []).append(r)
+
+    results: list[dict] = []
+    for repo_name, fixes in by_repo.items():
+        kw = [_fix_keywords(f["message"]) for f in fixes]
+        for i in range(len(fixes)):
+            if not kw[i]:
+                continue
+            for j in range(i + 1, len(fixes)):
+                if not kw[j]:
+                    continue
+                union = kw[i] | kw[j]
+                jac = len(kw[i] & kw[j]) / len(union) if union else 0.0
+                if jac < min_similarity:
+                    continue
+                try:
+                    days = (datetime.fromisoformat(fixes[j]["author_date"][:19])
+                            - datetime.fromisoformat(fixes[i]["author_date"][:19])).days
+                except ValueError:
+                    continue
+                if days > _REFIX_MAX_DAYS:
+                    continue
+                # classify the kind of re-fix (different learnings):
+                #  - "thrash": same day, near-identical → fix redone immediately
+                #  - "recurred": days apart → the lesson didn't stick
+                kind = "thrash" if days == 0 and jac >= 0.9 else "recurred"
+                results.append({
+                    "repo": repo_name,
+                    "owner": fixes[i]["owner"],
+                    "similarity": round(jac, 2),
+                    "days_between": days,
+                    "kind": kind,
+                    "original": {
+                        "sha": fixes[i]["sha"][:7],
+                        "subject": (fixes[i]["message"] or "").split("\n")[0][:80],
+                        "date": fixes[i]["author_date"][:10],
+                    },
+                    "refix": {
+                        "sha": fixes[j]["sha"][:7],
+                        "subject": (fixes[j]["message"] or "").split("\n")[0][:80],
+                        "date": fixes[j]["author_date"][:10],
+                    },
+                })
+
+    results.sort(key=lambda x: x["refix"]["date"], reverse=True)
+    return results
 
 
 # ── Enrich gh_commits with agent columns ─────────────────────────────────────
