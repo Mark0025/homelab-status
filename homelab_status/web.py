@@ -20,6 +20,7 @@ from .git_history import (
 from .timeline import (
     build_commit_timeline, build_pr_timeline,
     enrich_all_commits, get_commit_type_stats, get_pr_list, refresh_prs,
+    refresh_issues, get_issue_stats,
 )
 from .project_intel import (
     enrich_commits_with_agents, get_agent_stats, get_all_profiles,
@@ -249,6 +250,18 @@ async def timeline_refresh_prs():
     """Fetch PRs from GitHub for all repos in background."""
     asyncio.create_task(refresh_prs())
     return JSONResponse({"status": "pr_refresh_started"})
+
+
+@api.post("/api/issues/refresh")
+async def issues_refresh():
+    """Ingest GitHub issues (the problem side of the arc) for all repos."""
+    asyncio.create_task(refresh_issues())
+    return JSONResponse({"status": "issue_refresh_started"})
+
+
+@api.get("/api/issues/stats")
+async def issues_stats():
+    return JSONResponse(get_issue_stats())
 
 
 # ── Project Intelligence endpoints ───────────────────────────────────────────

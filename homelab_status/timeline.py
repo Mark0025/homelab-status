@@ -59,6 +59,29 @@ def _init_timeline_tables() -> None:
         CREATE INDEX IF NOT EXISTS idx_prs_repo    ON gh_pull_requests(repo);
         CREATE INDEX IF NOT EXISTS idx_prs_merged  ON gh_pull_requests(merged_at);
         CREATE INDEX IF NOT EXISTS idx_prs_state   ON gh_pull_requests(state);
+
+        -- Issues = the PROBLEM side of the problem→solution arc (#13 ecosystem
+        -- learning). GitHub's /issues returns PRs too; we store only real issues.
+        CREATE TABLE IF NOT EXISTS gh_issues (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            number          INTEGER NOT NULL,
+            repo            TEXT NOT NULL,
+            owner           TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            body            TEXT DEFAULT '',
+            state           TEXT DEFAULT 'open',
+            labels          TEXT DEFAULT '[]',
+            author          TEXT DEFAULT '',
+            comments        INTEGER DEFAULT 0,
+            created_at      TEXT,
+            closed_at       TEXT,
+            closed_by_pr    INTEGER DEFAULT 0,
+            fetched_at      TEXT NOT NULL,
+            UNIQUE(repo, owner, number)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_issues_repo  ON gh_issues(repo);
+        CREATE INDEX IF NOT EXISTS idx_issues_state ON gh_issues(state);
         """)
         # Idempotent column additions
         for col, defn in [
@@ -234,6 +257,117 @@ async def fetch_prs_for_repo(
             logger.warning(f"PR fetch error {owner}/{repo}: {e}")
             break
     return all_prs
+
+
+async def fetch_issues_for_repo(
+    client: httpx.AsyncClient, owner: str, repo: str, state: str = "all"
+) -> list[dict]:
+    """Fetch real issues (GitHub's /issues includes PRs — filter those out)."""
+    all_issues: list[dict] = []
+    page = 1
+    while True:
+        try:
+            resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/issues",
+                headers=_github_headers(),  # lazy + fails loud on missing token (#20)
+                params={"state": state, "per_page": 100, "page": page},
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            if not data:
+                break
+            # drop pull requests — they appear in /issues but have this key
+            all_issues.extend([i for i in data if "pull_request" not in i])
+            if len(data) < 100:
+                break
+            page += 1
+        except Exception as e:
+            logger.warning(f"Issue fetch error {owner}/{repo}: {e}")
+            break
+    return all_issues
+
+
+def _extract_closing_pr(issue: dict) -> int:
+    """Best-effort: the PR number that closed this issue, if discoverable from
+    the timeline/body. GitHub's list API doesn't include it directly, so 0 here;
+    the PR→issue link is recoverable later from PR bodies (`Closes #N`)."""
+    return 0
+
+
+def _save_issues(issues: list[dict], owner: str, repo: str) -> int:
+    ts = datetime.now().isoformat()
+    rows = []
+    for i in issues:
+        labels = [l.get("name", "") for l in (i.get("labels") or [])]
+        rows.append((
+            i["number"], repo, owner,
+            i.get("title", ""),
+            i.get("body") or "",
+            i.get("state", "open"),
+            json.dumps(labels),
+            (i.get("user") or {}).get("login", ""),
+            i.get("comments", 0),
+            i.get("created_at"),
+            i.get("closed_at"),
+            _extract_closing_pr(i),
+            ts,
+        ))
+    with _conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO gh_issues
+               (number, repo, owner, title, body, state, labels, author,
+                comments, created_at, closed_at, closed_by_pr, fetched_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+    return len(rows)
+
+
+async def refresh_issues(repos: list[tuple[str, str]] | None = None) -> dict:
+    """Fetch issues for all repos (or a subset). The problem side of the arc."""
+    _init_timeline_tables()
+    from .git_history import _resolve_token
+    if not _resolve_token():
+        logger.error("Issue refresh aborted: no GitHub token resolved (see #20).")
+        return {"status": "error", "error": "no_github_token", "issues_saved": 0}
+    if repos is None:
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT owner, name FROM gh_repos ORDER BY pushed_at DESC"
+            ).fetchall()
+        repos = [(r["owner"], r["name"]) for r in rows]
+
+    sem = asyncio.Semaphore(6)
+
+    async def _do(client: httpx.AsyncClient, owner: str, repo: str) -> int:
+        async with sem:
+            issues = await fetch_issues_for_repo(client, owner, repo)
+            return _save_issues(issues, owner, repo) if issues else 0
+
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*[_do(client, o, r) for o, r in repos])
+    total = sum(results)
+    logger.info(f"Issue refresh done: {total} issues saved across {len(repos)} repos")
+    return {"issues_saved": total, "repos_scanned": len(repos)}
+
+
+def get_issue_stats() -> dict:
+    """Counts for the problem side — total/open/closed, top labels."""
+    _init_timeline_tables()
+    with _conn() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM gh_issues").fetchone()[0]
+        open_n = conn.execute("SELECT COUNT(*) FROM gh_issues WHERE state='open'").fetchone()[0]
+        by_repo = conn.execute(
+            "SELECT repo, COUNT(*) c FROM gh_issues GROUP BY repo ORDER BY c DESC LIMIT 10"
+        ).fetchall()
+    return {
+        "total_issues": total,
+        "open_issues": open_n,
+        "closed_issues": total - open_n,
+        "by_repo": [dict(r) for r in by_repo],
+    }
 
 
 def _detect_merge_strategy(pr: dict) -> str:
