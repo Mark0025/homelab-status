@@ -23,7 +23,8 @@ from .timeline import (
 )
 from .project_intel import (
     enrich_commits_with_agents, get_agent_stats, get_all_profiles,
-    get_project_profile, extract_fix_patterns, detect_refixes, refix_mermaid, search_profiles,
+    get_project_profile, extract_fix_patterns, detect_refixes, refix_mermaid,
+    refixes_with_plans, search_profiles,
     refresh_all_profiles, _profile_running as _intel_running,
 )
 from .services import CATEGORY_LABELS, SERVICES
@@ -281,9 +282,11 @@ async def intel_fixes(repo: str | None = Query(None), limit: int = Query(100)):
 
 @api.get("/api/intel/refixes")
 async def intel_refixes(repo: str | None = Query(None), limit: int = Query(100)):
-    """Re-fixes (#13 Layer A): fix pairs where the earlier fix didn't hold."""
-    refixes = detect_refixes(repo=repo)
-    return JSONResponse({"total": len(refixes), "refixes": refixes[:limit]})
+    """Re-fixes (#13 Layer A): fix pairs where the earlier fix didn't hold,
+    each annotated with the repo's plan docs (#13 PR 3) — was this area planned?"""
+    refixes = refixes_with_plans(repo=repo, limit=limit)
+    planned = sum(1 for r in refixes if r.get("had_plan"))
+    return JSONResponse({"total": len(refixes), "planned_but_broke": planned, "refixes": refixes})
 
 
 @api.get("/api/intel/refixes/mermaid")

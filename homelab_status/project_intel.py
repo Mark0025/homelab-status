@@ -1283,6 +1283,38 @@ def detect_refixes(repo: str | None = None, min_similarity: float = _REFIX_SIMIL
     return results
 
 
+def refixes_with_plans(repo: str | None = None, limit: int = 100) -> list[dict]:
+    """#13 PR 3: attach plan/spec docs to each repo's re-fixes, so a re-fix can be
+    read against what (if anything) the plan said about that area.
+
+    Deterministic JOIN only — adds, per re-fix, the repo's plan docs (title, path,
+    is_plan, date) and a `had_plan` flag. The deeper 'why the plan failed' is an
+    interpretation left to the reader/enricher; this surfaces whether a plan even
+    existed for an area that needed re-fixing (a 'planned-but-still-broke' signal).
+    """
+    from .mdops import docs_for_repo
+
+    refixes = detect_refixes(repo=repo)[:limit]
+    # cache plan-doc lookups per repo (don't re-query for every re-fix)
+    plans_by_repo: dict[str, list[dict]] = {}
+    for rx in refixes:
+        r = rx["repo"]
+        if r not in plans_by_repo:
+            try:
+                docs = docs_for_repo(r, owner=rx.get("owner", "Mark0025"))
+                plans_by_repo[r] = [
+                    {"title": d.get("title"), "path": d.get("relative_path"),
+                     "is_plan": d.get("is_plan"), "updated": d.get("file_updated_at")}
+                    for d in docs if d.get("is_plan")
+                ]
+            except Exception:
+                plans_by_repo[r] = []
+        plans = plans_by_repo[r]
+        rx["plans"] = plans[:3]
+        rx["had_plan"] = bool(plans)
+    return refixes
+
+
 def _mermaid_escape(text: str) -> str:
     """Make a fix subject safe inside a Mermaid node label."""
     return (text or "").replace('"', "'").replace("\n", " ").replace("[", "(").replace("]", ")")
@@ -1295,12 +1327,13 @@ def refix_mermaid(repo: str | None = None, limit: int = 12) -> str:
     the browser renders it. homelab-status owns the re-fix data, so it generates
     its own diagram. One chain per re-fix: original --didn't hold--> refix --> verdict.
     """
-    refixes = detect_refixes(repo=repo)[:limit]
+    refixes = refixes_with_plans(repo=repo, limit=limit)
     if not refixes:
         return 'graph LR\n  empty["✅ No re-fixes found — fixes are holding"]'
 
     lines = [
         "graph LR",
+        "  classDef plan fill:#1f3d2e,stroke:#22c55e,color:#fff;",
         "  classDef orig fill:#1e3a5f,stroke:#3b82f6,color:#fff;",
         "  classDef refix fill:#5f1e1e,stroke:#ef4444,color:#fff;",
         "  classDef verdict fill:#3a2f5f,stroke:#a855f7,color:#fff;",
@@ -1309,9 +1342,20 @@ def refix_mermaid(repo: str | None = None, limit: int = 12) -> str:
         o, r = rx["original"], rx["refix"]
         oid, rid, vid = f"O{n}", f"R{n}", f"V{n}"
         arrow = "redone same day" if rx["kind"] == "thrash" else f"recurred {rx['days_between']}d later"
+        # #13 PR 3: if the repo had a plan doc, anchor the chain to it.
+        if rx.get("had_plan") and rx.get("plans"):
+            pid = f"P{n}"
+            plan_title = _mermaid_escape((rx["plans"][0].get("title") or "plan")[:50])
+            lines.append(f'  {pid}["📄 plan: {plan_title}"]:::plan')
+            lines.append(f'  {pid} -->|intended| {oid}')
         lines.append(f'  {oid}["🔧 {o["sha"]} ({o["date"]})<br/>{_mermaid_escape(o["subject"])}"]:::orig')
         lines.append(f'  {rid}["🔧 {r["sha"]} ({r["date"]})<br/>{_mermaid_escape(r["subject"])}"]:::refix')
-        verdict = "thrash — redone immediately" if rx["kind"] == "thrash" else "lesson did not stick"
+        if rx.get("had_plan"):
+            verdict = "planned area still re-fixed<br/>plan underspecified this"
+        elif rx["kind"] == "thrash":
+            verdict = "thrash — redone immediately"
+        else:
+            verdict = "lesson did not stick"
         lines.append(f'  {vid}["❌ {rx["repo"]}<br/>{verdict}"]:::verdict')
         lines.append(f'  {oid} -->|{arrow}| {rid}')
         lines.append(f'  {rid} --> {vid}')

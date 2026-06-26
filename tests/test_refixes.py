@@ -90,3 +90,25 @@ def test_refix_mermaid_syntax_and_empty(monkeypatch):
     assert "recurred 9d later" in out
     assert "[" not in out.split("classDef")[-1].replace("[\"", "").replace("\"]", "") or True  # escaped
     assert "lesson did not stick" in out
+
+
+def test_refixes_with_plans_attaches_plan_flag(monkeypatch):
+    """#13 PR 3: re-fixes get plan docs + had_plan flag joined in."""
+    fake_rx = [{"repo": "myrepo", "owner": "me", "similarity": 0.6, "days_between": 5,
+                "kind": "recurred",
+                "original": {"sha": "a", "subject": "fix x", "date": "2026-01-01"},
+                "refix": {"sha": "b", "subject": "fix x again", "date": "2026-01-06"}}]
+    monkeypatch.setattr(pi, "detect_refixes", lambda **k: list(fake_rx))
+    # plan doc exists for myrepo
+    import homelab_status.mdops as mdops
+    monkeypatch.setattr(mdops, "docs_for_repo",
+                        lambda r, owner="Mark0025": [{"title": "myrepo PLAN", "relative_path": "PLAN.md", "is_plan": True, "file_updated_at": "2025-12-01"}])
+    out = pi.refixes_with_plans()
+    assert out[0]["had_plan"] is True
+    assert out[0]["plans"][0]["title"] == "myrepo PLAN"
+
+    # no plan docs
+    monkeypatch.setattr(pi, "detect_refixes", lambda **k: list(fake_rx))
+    monkeypatch.setattr(mdops, "docs_for_repo", lambda r, owner="Mark0025": [])
+    out2 = pi.refixes_with_plans()
+    assert out2[0]["had_plan"] is False
