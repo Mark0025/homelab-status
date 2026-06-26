@@ -22,21 +22,21 @@ services:
       - /home/mark/00Myhomelab/MDDPY-MAC-GLOBAL/data-mac/mdops-mac.db:/data/mdops-mac.db:ro
     networks:
       - nginx-network
-    labels:
-      # Opt THIS container in to Watchtower auto-update (#19). The Watchtower
-      # below runs with WATCHTOWER_LABEL_ENABLE=true, so it updates ONLY labeled
-      # containers — it does NOT touch the other ~105 containers on this host.
-      - "com.centurylinklabs.watchtower.enable=true"
+    # NOTE: deliberately NO com.centurylinklabs.watchtower.enable label — that
+    # label is already used by 6 OTHER containers on this host, so label-scoping
+    # would auto-update all of them. We scope by NAME below instead. (#19)
 
-  # Scoped auto-deploy (#19): pulls a new ghcr :latest and restarts ONLY the
-  # labeled homelab-status container. Polls every 5 min, cleans old images.
-  # NOT host-wide — WATCHTOWER_LABEL_ENABLE keeps the blast radius to 1 container.
+  # Scoped auto-deploy (#19): the maintained watchtower fork (the original
+  # containrrr/watchtower is abandoned + ships an ancient Docker API client that
+  # modern daemons reject). It watches ONLY the 'homelab-status' container passed
+  # as an arg — NOT label-scoped (the shared label hits 6 unrelated containers),
+  # NOT host-wide. Blast radius = exactly this one container. Polls every 5 min.
   watchtower-homelab-status:
-    image: containrrr/watchtower:latest
+    image: ghcr.io/nicholas-fedor/watchtower:latest
     container_name: watchtower-homelab-status
     restart: unless-stopped
+    command: ["homelab-status"]   # watch ONLY this container, by name
     environment:
-      - WATCHTOWER_LABEL_ENABLE=true
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=300
       - WATCHTOWER_INCLUDE_RESTARTING=true
