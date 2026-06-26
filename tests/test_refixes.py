@@ -28,23 +28,29 @@ def test_unrelated_fixes_are_not_a_refix():
     assert jaccard < pi._REFIX_SIMILARITY
 
 
-def test_detect_refixes_finds_and_classifies(monkeypatch, tmp_path):
-    """End-to-end on a tiny in-memory dataset: a recurred re-fix + a fork excluded."""
+def test_detect_refixes_filters_by_author_not_repo(monkeypatch, tmp_path):
+    """The signal is MARK's fixes that didn't hold — by AUTHOR, not by repo.
+    His work in a cloned repo is KEPT; the upstream maintainer's re-fix is dropped."""
     import sqlite3
 
     db = tmp_path / "t.db"
     conn = sqlite3.connect(db)
     conn.execute("""CREATE TABLE gh_commits (sha TEXT, repo TEXT, owner TEXT,
-        message TEXT, author_date TEXT, commit_type TEXT)""")
+        message TEXT, author_date TEXT, commit_type TEXT,
+        is_claude INTEGER, author_name TEXT)""")
     rows = [
-        ("a1", "myrepo", "me", "fix: API_URL env var for server-side proxy", "2026-01-01T00:00:00", "fix"),
-        ("a2", "myrepo", "me", "fix: API_URL env var for server-side proxy again", "2026-01-10T00:00:00", "fix"),
-        ("b1", "myrepo", "me", "fix: totally unrelated stripe checkout url", "2026-01-05T00:00:00", "fix"),
-        # a fork that must be EXCLUDED even though it has a re-fix
-        ("c1", "next.js", "vercel", "fix: hydration mismatch in app router", "2026-01-01T00:00:00", "fix"),
-        ("c2", "next.js", "vercel", "fix: hydration mismatch in app router edge", "2026-01-02T00:00:00", "fix"),
+        # Mark's own repo — a recurred re-fix (kept)
+        ("a1", "myrepo", "me", "fix: API_URL env var for server-side proxy", "2026-01-01T00:00:00", "fix", 0, "Mark Carpenter"),
+        ("a2", "myrepo", "me", "fix: API_URL env var for server-side proxy again", "2026-01-10T00:00:00", "fix", 0, "Mark Carpenter"),
+        ("b1", "myrepo", "me", "fix: totally unrelated stripe checkout url", "2026-01-05T00:00:00", "fix", 0, "Mark Carpenter"),
+        # CLONED upstream repo: MARK re-fixed his own provider — MUST be kept
+        ("m1", "browser-use", "x", "fix: ChatClaudeCode provider token handling", "2026-02-01T00:00:00", "fix", 1, "Claude"),
+        ("m2", "browser-use", "x", "fix: ChatClaudeCode provider token handling retry", "2026-02-03T00:00:00", "fix", 1, "Claude"),
+        # CLONED upstream repo: the MAINTAINER's re-fix — MUST be dropped (not Mark)
+        ("u1", "browser-use", "x", "fix: hydration mismatch in app router", "2026-01-01T00:00:00", "fix", 0, "Magnus Müller"),
+        ("u2", "browser-use", "x", "fix: hydration mismatch in app router edge", "2026-01-02T00:00:00", "fix", 0, "Magnus Müller"),
     ]
-    conn.executemany("INSERT INTO gh_commits VALUES (?,?,?,?,?,?)", rows)
+    conn.executemany("INSERT INTO gh_commits VALUES (?,?,?,?,?,?,?,?)", rows)
     conn.commit(); conn.close()
 
     monkeypatch.setattr(pi, "_init_intel_tables", lambda: None)
@@ -61,13 +67,14 @@ def test_detect_refixes_finds_and_classifies(monkeypatch, tmp_path):
     monkeypatch.setattr(pi, "_conn", fake_conn)
 
     refixes = pi.detect_refixes()
-    repos = {r["repo"] for r in refixes}
-    assert "myrepo" in repos
-    assert "next.js" not in repos          # fork excluded (SKIP_REPOS)
-    me = [r for r in refixes if r["repo"] == "myrepo"]
-    assert len(me) == 1                     # only the similar pair, not the unrelated one
-    assert me[0]["kind"] == "recurred"      # 9 days apart
-    assert me[0]["days_between"] == 9
+    subjects = " ".join(r["refix"]["subject"] for r in refixes)
+    # Mark's own-repo re-fix kept
+    myrepo = [r for r in refixes if r["repo"] == "myrepo"]
+    assert len(myrepo) == 1 and myrepo[0]["days_between"] == 9
+    # Mark's re-fix in the CLONED repo kept (the whole point — not fork-excluded)
+    assert "ChatClaudeCode" in subjects
+    # the UPSTREAM maintainer's re-fix in the same cloned repo dropped
+    assert "hydration" not in subjects
 
 
 def test_refix_mermaid_syntax_and_empty(monkeypatch):
