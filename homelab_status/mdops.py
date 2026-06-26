@@ -282,6 +282,68 @@ def _count_prs_for_repo(git_remotes: str, project_remote: str) -> int:
         return 0
 
 
+def _repo_execution_signals(repo: str) -> dict:
+    """Pull execution signals for a repo from status.db (commits/PRs/issues).
+    The DEEPER question than grade_doc's 'did it ship?': 'did it ship WELL?'."""
+    from .db import _conn as hs_conn
+    try:
+        with hs_conn() as conn:
+            feat = conn.execute("SELECT COUNT(*) FROM gh_commits WHERE repo=? AND commit_type='feat'", (repo,)).fetchone()[0]
+            fix = conn.execute("SELECT COUNT(*) FROM gh_commits WHERE repo=? AND commit_type='fix'", (repo,)).fetchone()[0]
+            prs = conn.execute("SELECT COUNT(*) FROM gh_pull_requests WHERE repo=?", (repo,)).fetchone()[0]
+            has_issues = conn.execute("SELECT name FROM sqlite_master WHERE name='gh_issues'").fetchone()
+            issues = open_issues = 0
+            if has_issues:
+                issues = conn.execute("SELECT COUNT(*) FROM gh_issues WHERE repo=?", (repo,)).fetchone()[0]
+                open_issues = conn.execute("SELECT COUNT(*) FROM gh_issues WHERE repo=? AND state='open'", (repo,)).fetchone()[0]
+    except Exception:
+        feat = fix = prs = issues = open_issues = 0
+    return {"feat": feat, "fix": fix, "prs": prs, "issues": issues, "open_issues": open_issues}
+
+
+def plan_reality(doc_id: int) -> dict:
+    """#13 — measure a plan against its execution: 'what was WORKING vs NOT'.
+
+    grade_doc answers 'did stuff happen near this plan?' (activity). This answers
+    the harder question — did the plan's intent get achieved, or did it struggle?
+    WORKING signals: feat commits, low fix-ratio, few open issues.
+    STRUGGLED signals: high fix-ratio, many open issues (the gap between a plan
+    that says 'Complete ✅' and an execution that kept breaking).
+    """
+    doc = get_doc(doc_id)
+    if not doc:
+        return {"error": "doc not found"}
+
+    github = _extract_github_repo(doc.get("git_remotes") or "", doc.get("project_remote") or "")
+    repo = github.split("/", 1)[1] if github and "/" in github else (github or "")
+    if not repo:
+        return {"doc_id": doc_id, "title": doc.get("title"), "verdict": "unlinked",
+                "reason": "plan not linked to a GitHub repo (no git_remotes match)"}
+
+    sig = _repo_execution_signals(repo)
+    total = sig["feat"] + sig["fix"]
+    fix_ratio = round(sig["fix"] / total, 2) if total else 0.0
+    open_ratio = round(sig["open_issues"] / sig["issues"], 2) if sig["issues"] else 0.0
+
+    # deterministic verdict — no AI, all from data
+    if total == 0:
+        verdict, reason = "not-executed", "plan exists but no feat/fix commits in the repo"
+    elif fix_ratio >= 0.5 or open_ratio >= 0.4:
+        verdict = "struggled"
+        reason = f"high fix-ratio ({int(fix_ratio*100)}%) / open-issue-ratio ({int(open_ratio*100)}%) — execution diverged from the plan"
+    elif fix_ratio <= 0.3 and open_ratio <= 0.2:
+        verdict, reason = "working", f"mostly feature work (fix-ratio {int(fix_ratio*100)}%), issues resolved"
+    else:
+        verdict, reason = "mixed", f"fix-ratio {int(fix_ratio*100)}%, open-issue-ratio {int(open_ratio*100)}%"
+
+    return {
+        "doc_id": doc_id, "title": doc.get("title"), "repo": repo,
+        "verdict": verdict, "reason": reason,
+        "fix_ratio": fix_ratio, "open_issue_ratio": open_ratio,
+        "signals": sig,
+    }
+
+
 # ── Repo-linked docs (for Dev Intelligence cards) ────────────────────────────
 
 def docs_for_repo(repo_name: str, owner: str = "Mark0025") -> list[dict]:

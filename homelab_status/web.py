@@ -29,7 +29,10 @@ from .project_intel import (
     refresh_all_profiles, _profile_running as _intel_running,
 )
 from .services import CATEGORY_LABELS, SERVICES
-from .mdops import doc_stats, docs_for_repo, get_doc, grade_doc, list_projects, search_docs
+from .mdops import (
+    doc_stats, docs_for_repo, get_doc, grade_doc, plan_reality,
+    list_projects, search_docs,
+)
 from .journey import (
     get_chapters, get_episodes, get_episode_questions, get_journey_stats,
     scaffold_episodes, update_episode, save_answer, update_question,
@@ -344,6 +347,12 @@ async def mdops_doc(doc_id: int):
 @api.get("/api/mdops/grade/{doc_id}")
 async def mdops_grade(doc_id: int):
     return JSONResponse(grade_doc(doc_id))
+
+
+@api.get("/api/mdops/reality/{doc_id}")
+async def mdops_reality(doc_id: int):
+    """Plan vs execution (#13): 'what was WORKING vs NOT' for this plan."""
+    return JSONResponse(plan_reality(doc_id))
 
 
 @api.get("/api/mdops/repo/{repo_name}")
