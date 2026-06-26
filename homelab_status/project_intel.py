@@ -26,7 +26,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .db import _conn, init_db
-from .git_history import GITHUB_HEADERS, SKIP_REPOS, _init_git_tables
+from .git_history import GITHUB_HEADERS, _init_git_tables
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -1207,19 +1207,28 @@ def _fix_keywords(message: str) -> set[str]:
     return {w for w in subject.split() if len(w) > 3 and w not in _STOPWORDS}
 
 
-def detect_refixes(repo: str | None = None, min_similarity: float = _REFIX_SIMILARITY) -> list[dict]:
-    """Find fix pairs in the same repo whose subjects are similar — the earlier
-    fix "didn't hold". Forks are excluded (SKIP_REPOS) so other people's fixes
-    don't drown the signal. Returns newest-re-fix-first.
+# A re-fix is a LEARNING only if it's MARK's own fix that didn't hold. Filtering
+# by author (not by whole-repo fork exclusion) is the correct signal: it keeps
+# Mark's work even in CLONED repos (e.g. his ChatClaudeCode commits in
+# browser-use) while dropping the upstream maintainers' fixes that otherwise
+# drown everything. Measured on real data: browser-use 2275 re-fixes (upstream
+# noise) -> 1 (Mark's real one); fabric 94 -> 0; pete-db/Aireinvestor unchanged.
+_MINE = "(is_claude = 1 OR author_name LIKE '%Mark%')"
 
-    Each result: {repo, owner, similarity, days_between,
+
+def detect_refixes(repo: str | None = None, min_similarity: float = _REFIX_SIMILARITY) -> list[dict]:
+    """Find fix pairs whose subjects are similar — the earlier fix "didn't hold".
+    Only MARK's own fixes are correlated (by author, not by repo), so his work in
+    cloned repos counts but upstream maintainers' fixes don't. Newest-re-fix-first.
+
+    Each result: {repo, owner, similarity, days_between, kind,
                   original:{sha,subject,date}, refix:{sha,subject,date}}
     """
     _init_intel_tables()
-    query = """
+    query = f"""
         SELECT sha, repo, owner, message, author_date
         FROM gh_commits
-        WHERE commit_type = 'fix' AND author_date != ''
+        WHERE commit_type = 'fix' AND author_date != '' AND {_MINE}
     """
     params: list[Any] = []
     if repo:
@@ -1230,11 +1239,8 @@ def detect_refixes(repo: str | None = None, min_similarity: float = _REFIX_SIMIL
     with _conn() as conn:
         rows = [dict(r) for r in conn.execute(query, params).fetchall()]
 
-    # group by repo, skipping forks/upstream noise
     by_repo: dict[str, list[dict]] = {}
     for r in rows:
-        if r["repo"] in SKIP_REPOS:
-            continue
         by_repo.setdefault(r["repo"], []).append(r)
 
     results: list[dict] = []
