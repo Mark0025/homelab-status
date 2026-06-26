@@ -22,7 +22,7 @@ import httpx
 from loguru import logger
 
 from .db import _conn, init_db
-from .git_history import GITHUB_HEADERS, _init_git_tables
+from .git_history import _github_headers, _init_git_tables
 
 # ── DB schema for PRs and enriched commits ───────────────────────────────────
 
@@ -217,7 +217,7 @@ async def fetch_prs_for_repo(
         try:
             resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls",
-                headers=GITHUB_HEADERS,
+                headers=_github_headers(),  # lazy + fails loud on missing token (#20)
                 params={"state": state, "per_page": 100, "page": page},
                 timeout=15.0,
             )
@@ -290,6 +290,12 @@ def _save_prs(prs: list[dict], owner: str, repo: str) -> int:
 async def refresh_prs(repos: list[tuple[str, str]] | None = None) -> dict:
     """Fetch PRs for all repos (or a subset). Returns stats."""
     _init_timeline_tables()
+    # Fail loud on missing token instead of silently saving 0 PRs (same class
+    # of bug as #20 — the PR path used to send an empty Bearer header).
+    from .git_history import _resolve_token
+    if not _resolve_token():
+        logger.error("PR refresh aborted: no GitHub token resolved (see #20).")
+        return {"status": "error", "error": "no_github_token", "prs_saved": 0}
     if repos is None:
         with _conn() as conn:
             rows = conn.execute(
