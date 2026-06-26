@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Homelab Status</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+
+<header>
+  <h1>🏠 <span>Homelab</span> Status</h1>
+  <div class="header-right">
+    <span id="checked-at">Loading...</span>
+    <button id="refresh-btn" onclick="refresh()">Refresh</button>
+  </div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('services', this)">Services</div>
+  <div class="tab" onclick="showTab('routes', this)">API Routes <span id="route-count-badge" style="color:var(--yellow);font-size:11px"></span></div>
+  <div class="tab" onclick="showTab('git', this)">Git History <span id="git-count-badge" style="color:var(--green);font-size:11px"></span></div>
+  <div class="tab" onclick="showTab('timeline', this)">Timeline &amp; Analytics</div>
+  <div class="tab" onclick="showTab('intel', this)">Dev Intelligence</div>
+  <div class="tab" onclick="showTab('plans', this)">Plans &amp; Docs <span id="plans-count-badge" style="color:var(--muted);font-size:11px"></span></div>
+  <div class="tab" onclick="showTab('journey', this)">Journey 🎙️ <span id="journey-ep-badge" style="color:var(--purple);font-size:11px"></span></div>
+</div>
+
+<!-- SERVICES TAB -->
+<div id="services-view">
+  <div class="summary" id="summary"></div>
+  <div class="controls">
+    <button class="filter-btn active" data-cat="all" onclick="setFilter('all', this)">All</button>
+    <button class="filter-btn" data-cat="terry" onclick="setFilter('terry', this)">Terry</button>
+    <button class="filter-btn" data-cat="pete" onclick="setFilter('pete', this)">Pete</button>
+    <button class="filter-btn" data-cat="ai" onclick="setFilter('ai', this)">AI/LLM</button>
+    <button class="filter-btn" data-cat="monitoring" onclick="setFilter('monitoring', this)">Monitoring</button>
+    <button class="filter-btn" data-cat="infrastructure" onclick="setFilter('infrastructure', this)">Infra</button>
+    <button class="filter-btn" data-cat="voice" onclick="setFilter('voice', this)">Voice</button>
+    <button class="filter-btn" data-cat="sites" onclick="setFilter('sites', this)">Sites</button>
+    <button class="filter-btn" data-cat="tools" onclick="setFilter('tools', this)">Tools</button>
+    <button class="filter-btn" data-cat="problems" onclick="setFilter('problems', this)" style="color:#ef4444;border-color:#ef4444">⚠ Problems</button>
+    <div class="search-wrap">
+      <input id="search" type="text" placeholder="Search services..." oninput="renderServices()">
+    </div>
+  </div>
+  <div class="grid" id="grid">
+    <div class="loading" style="grid-column:1/-1">
+      <div class="spinner"></div><br>Checking all endpoints...
+    </div>
+  </div>
+</div>
+
+<!-- TIMELINE TAB -->
+<div id="timeline-view" style="display:none;padding:16px 24px">
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <select id="tl-repo" onchange="loadTimeline()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:12px">
+      <option value="">All repos</option>
+    </select>
+    <select id="tl-group" onchange="loadTimeline()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:12px">
+      <option value="type">Group by: Commit Type</option>
+      <option value="repo">Group by: Repo</option>
+      <option value="author">Group by: Author</option>
+      <option value="strategy">Group by: Merge Strategy</option>
+      <option value="impact">Group by: Impact Size</option>
+    </select>
+    <select id="tl-since" onchange="loadTimeline()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:12px">
+      <option value="">All time</option>
+      <option value="2026-01-01">2026</option>
+      <option value="2025-01-01">2025+</option>
+      <option value="2024-01-01">2024+</option>
+      <option value="2023-01-01">2023+</option>
+    </select>
+    <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px">
+      <input type="checkbox" id="tl-bots" onchange="loadTimeline()"> Include bots
+    </label>
+    <div style="border-left:1px solid var(--border);height:20px;margin:0 4px"></div>
+    <button onclick="switchTimelineView('commits')" id="btn-commits"
+      style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+      Commits
+    </button>
+    <button onclick="switchTimelineView('prs')" id="btn-prs"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+      PR Lifecycle
+    </button>
+    <button onclick="triggerPRRefresh()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+      ↻ Fetch PRs
+    </button>
+    <span id="tl-status" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+  <div id="plotly-container">
+    <div class="loading"><div class="spinner"></div><br>Building timeline...</div>
+  </div>
+</div>
+
+<!-- INTELLIGENCE TAB -->
+<div id="intel-view" style="display:none;padding:16px 24px">
+
+  <!-- Agent Attribution Stats strip -->
+  <div id="intel-agent-strip" style="margin-bottom:20px"></div>
+
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <div style="display:flex;gap:6px">
+      <button onclick="showIntelView('fixes')" id="btn-intel-fixes"
+        style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+        Fix Patterns
+      </button>
+      <button onclick="showIntelView('repos')" id="btn-intel-repos"
+        style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+        Repo Intelligence
+      </button>
+    </div>
+    <input id="intel-search" type="text" placeholder="Search repos by purpose, what it does..."
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;font-size:13px;outline:none;width:320px"
+      oninput="searchIntel()">
+    <button onclick="triggerIntelRefresh()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;margin-left:auto">
+      ↻ Profile Repos
+    </button>
+    <span id="intel-status" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+
+  <div id="intel-content">
+    <div class="loading"><div class="spinner"></div><br>Loading intelligence...</div>
+  </div>
+</div>
+
+<!-- PLANS & DOCS TAB -->
+<div id="plans-view" style="display:none;padding:16px 24px">
+
+  <!-- Stats strip -->
+  <div id="plans-stats-strip" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px"></div>
+
+  <!-- Controls -->
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <input id="plans-search" type="text" placeholder="Search .md plans, specs, designs..."
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 14px;font-size:13px;outline:none;width:360px"
+      oninput="plansSearch()">
+    <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="plans-git-only" onchange="plansSearch()" style="cursor:pointer">
+      Git-tracked only
+    </label>
+    <button onclick="plansLoadProjects()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;margin-left:auto">
+      Browse Projects
+    </button>
+    <span id="plans-status" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+
+  <!-- Results -->
+  <div id="plans-content">
+    <div style="color:var(--muted);font-size:13px;padding:20px 0">
+      Search for a plan, spec, or design doc above — or click <strong>Browse Projects</strong> to see all indexed projects.
+    </div>
+  </div>
+
+  <!-- Detail panel (slides in) -->
+  <div id="plans-detail" style="display:none;position:fixed;top:0;right:0;width:680px;height:100vh;
+    background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;z-index:100;padding:24px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <strong id="plans-detail-title" style="font-size:14px;color:var(--text)"></strong>
+      <button onclick="closePlansDetail()"
+        style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px">✕</button>
+    </div>
+    <div id="plans-detail-body"></div>
+  </div>
+</div>
+
+<!-- JOURNEY TAB -->
+<div id="journey-view" style="display:none;padding:16px 24px">
+
+  <!-- Stats bar -->
+  <div id="journey-stats" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px"></div>
+
+  <!-- Chapter picker -->
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <span style="font-size:12px;color:var(--muted);font-weight:600">ERA:</span>
+    <button class="j-era-btn active" data-era="" onclick="selectEra('',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">All</button>
+    <button class="j-era-btn" data-era="collecting_era" onclick="selectEra('collecting_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">📦 Collecting</button>
+    <button class="j-era-btn" data-era="learning_era" onclick="selectEra('learning_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">📚 Learning</button>
+    <button class="j-era-btn" data-era="building_era" onclick="selectEra('building_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">🔨 Building</button>
+    <button class="j-era-btn" data-era="going_all_in" onclick="selectEra('going_all_in',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">🚀 Going All In</button>
+    <button class="j-era-btn" data-era="infrastructure_era" onclick="selectEra('infrastructure_era',this)"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">⚙️ Infrastructure</button>
+
+    <span style="margin-left:auto;font-size:12px;color:var(--muted)">Status:</span>
+    <select id="j-status-filter" onchange="loadJourneyEpisodes()"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:12px">
+      <option value="">All</option>
+      <option value="draft">Draft</option>
+      <option value="scheduled">Scheduled</option>
+      <option value="recorded">Recorded</option>
+      <option value="published">Published</option>
+    </select>
+  </div>
+
+  <!-- Episode list + detail split -->
+  <div style="display:grid;grid-template-columns:420px 1fr;gap:16px;height:calc(100vh - 260px)">
+
+    <!-- Episode list -->
+    <div style="overflow-y:auto;display:flex;flex-direction:column;gap:6px" id="j-episode-list">
+      <div style="color:var(--muted);font-size:12px;padding:20px 0">Loading episodes…</div>
+    </div>
+
+    <!-- Episode detail -->
+    <div id="j-episode-detail" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-y:auto">
+      <div style="color:var(--muted);font-size:13px">← Select an episode to see its interview questions.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- SCRIPT PREVIEW MODAL -->
+<div id="script-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:200;overflow-y:auto;padding:40px 20px">
+  <div style="max-width:760px;margin:0 auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div>
+        <h2 id="script-modal-title" style="font-size:16px;font-weight:700;color:var(--text)">Interview Script</h2>
+        <div id="script-modal-sub" style="font-size:11px;color:var(--muted);margin-top:2px"></div>
+      </div>
+      <button onclick="closeScriptModal()"
+        style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;line-height:1">✕</button>
+    </div>
+    <div id="script-modal-body" style="font-size:13px;line-height:1.7"></div>
+  </div>
+</div>
+
+<!-- GIT TAB -->
+<div id="git-view" style="display:none">
+  <div style="padding:16px 24px 0">
+    <div id="git-stats" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px"></div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+      <input id="git-search" type="text" placeholder="Search commits by message, repo, author..."
+        style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;font-size:13px;outline:none;width:380px"
+        oninput="renderCommits()">
+      <select id="git-repo-filter" onchange="loadCommits(this.value)"
+        style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:12px">
+        <option value="">All repos</option>
+      </select>
+      <button onclick="triggerGitRefresh()"
+        style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px">
+        ↻ Refresh from GitHub
+      </button>
+      <span id="git-refresh-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <div id="git-commits-container">
+      <div class="loading"><div class="spinner"></div><br>Loading git history...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ROUTES TAB -->
+<div id="routes-view" style="display:none">
+  <div id="route-search-wrap">
+    <input id="route-search" type="text" placeholder="Search routes by path, method, service, summary..." oninput="renderRoutes()">
+  </div>
+  <div id="routes-container">
+    <div class="loading"><div class="spinner"></div><br>Loading routes...</div>
+  </div>
+</div>
+
+<script src="/static/dashboard.js"></script>
+</body>
+</html>
+
