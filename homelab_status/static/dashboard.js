@@ -377,6 +377,7 @@ async function loadGitHistory() {
     allRepos = reposData.repos;
 
     renderGitStats(gitStatsData);
+    updateStaleBanner(gitStatsData);
     populateRepoFilter();
 
     const badge = document.getElementById('git-count-badge');
@@ -404,6 +405,34 @@ async function loadCommits(repo) {
   const data = await resp.json();
   allCommits = data.commits;
   renderCommits();
+}
+
+// #23 — surface data-freshness so the dashboard isn't confidently wrong.
+// A failed token (#20) makes ingestion fetch 0, so the UI shows stale numbers
+// with no tell. This banner makes the suspicion visible at the top of the page.
+function updateStaleBanner(s) {
+  const el = document.getElementById('stale-banner');
+  if (!el || !s) return;
+  let msg = null, broken = false;
+  if (!s.last_fetched) {
+    msg = '⚠️ Never synced from GitHub — counts may be empty or wrong.';
+    broken = true;
+  } else if (s.total_commits === 0) {
+    msg = '⚠️ 0 commits ingested — GitHub sync is likely broken (check the token, issue #20).';
+    broken = true;
+  } else if (s.commits_last_7d === 0) {
+    msg = '⚠️ 0 commits in the last 7 days — this can mean an idle week OR a broken sync. '
+        + 'Last synced ' + new Date(s.last_fetched).toLocaleString() + '.';
+  } else if (s.cache_fresh === false) {
+    msg = '↻ Data is stale (cache past TTL). Last synced ' + new Date(s.last_fetched).toLocaleString() + '.';
+  }
+  if (msg) {
+    el.textContent = msg;
+    el.classList.toggle('broken', broken);
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
 }
 
 function renderGitStats(s) {
@@ -734,6 +763,8 @@ async function load(force = false) {
     if (data.total_api_routes) {
       document.getElementById('route-count-badge').textContent = `(${data.total_api_routes})`;
     }
+    // #23 — refresh the global freshness banner on every load, regardless of active tab.
+    fetch('/api/git/stats').then(r => r.json()).then(updateStaleBanner).catch(() => {});
   } catch(e) {
     document.getElementById('grid').innerHTML = `<div class="loading" style="color:#ef4444">Error: ${e.message}</div>`;
   } finally {
