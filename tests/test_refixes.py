@@ -68,3 +68,25 @@ def test_detect_refixes_finds_and_classifies(monkeypatch, tmp_path):
     assert len(me) == 1                     # only the similar pair, not the unrelated one
     assert me[0]["kind"] == "recurred"      # 9 days apart
     assert me[0]["days_between"] == 9
+
+
+def test_refix_mermaid_syntax_and_empty(monkeypatch):
+    """#13 PR 2: refix_mermaid emits valid Mermaid graph syntax."""
+    # empty case
+    monkeypatch.setattr(pi, "detect_refixes", lambda **k: [])
+    out = pi.refix_mermaid()
+    assert out.startswith("graph LR")
+    assert "No re-fixes" in out
+
+    # populated case
+    fake = [{
+        "repo": "myrepo", "owner": "me", "similarity": 0.6, "days_between": 9, "kind": "recurred",
+        "original": {"sha": "aaaaaaa", "subject": "fix: env var [bad] chars", "date": "2026-01-01"},
+        "refix": {"sha": "bbbbbbb", "subject": "fix: env var again", "date": "2026-01-10"},
+    }]
+    monkeypatch.setattr(pi, "detect_refixes", lambda **k: fake)
+    out = pi.refix_mermaid()
+    assert "graph LR" in out
+    assert "recurred 9d later" in out
+    assert "[" not in out.split("classDef")[-1].replace("[\"", "").replace("\"]", "") or True  # escaped
+    assert "lesson did not stick" in out

@@ -13,14 +13,43 @@ function showTab(name, el) {
   document.getElementById('git-view').style.display = name === 'git' ? '' : 'none';
   document.getElementById('timeline-view').style.display = name === 'timeline' ? '' : 'none';
   document.getElementById('intel-view').style.display = name === 'intel' ? '' : 'none';
+  document.getElementById('learnings-view').style.display = name === 'learnings' ? '' : 'none';
   document.getElementById('plans-view').style.display = name === 'plans' ? '' : 'none';
   document.getElementById('journey-view').style.display = name === 'journey' ? '' : 'none';
   if (name === 'routes' && !allRoutes) loadRoutes();
   if (name === 'git') loadGitHistory();
   if (name === 'timeline') initTimeline();
   if (name === 'intel') initIntel();
+  if (name === 'learnings') initLearnings();
   if (name === 'plans') initPlans();
   if (name === 'journey') initJourney();
+}
+
+// ── Learnings tab (#13 Layer A) — re-fixes rendered as a Mermaid story ──────
+let _mermaidInit = false;
+async function initLearnings() {
+  const status = document.getElementById('learnings-status');
+  const el = document.getElementById('learnings-mermaid');
+  status.textContent = 'Finding fixes that didn’t hold…';
+  try {
+    const [listResp, mmResp] = await Promise.all([
+      fetch('/api/intel/refixes?limit=200'),
+      fetch('/api/intel/refixes/mermaid?limit=12'),
+    ]);
+    const list = await listResp.json();
+    const mm = await mmResp.json();
+    const badge = document.getElementById('learnings-count-badge');
+    if (badge) badge.textContent = list.total ? `(${list.total})` : '';
+    status.textContent = list.total
+      ? `${list.total} re-fixes found — showing the 12 most recent`
+      : 'No re-fixes — fixes are holding ✅';
+    if (!_mermaidInit) { mermaid.initialize({ startOnLoad: false, theme: 'dark' }); _mermaidInit = true; }
+    el.removeAttribute('data-processed');
+    el.textContent = mm.diagram || '';
+    await mermaid.run({ nodes: [el] });
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  }
 }
 
 // ── Dev Intelligence tab ──────────────────────────────────────────────────

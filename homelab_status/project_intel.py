@@ -1283,6 +1283,41 @@ def detect_refixes(repo: str | None = None, min_similarity: float = _REFIX_SIMIL
     return results
 
 
+def _mermaid_escape(text: str) -> str:
+    """Make a fix subject safe inside a Mermaid node label."""
+    return (text or "").replace('"', "'").replace("\n", " ").replace("[", "(").replace("]", ")")
+
+
+def refix_mermaid(repo: str | None = None, limit: int = 12) -> str:
+    """Render re-fixes as Mermaid `graph LR` syntax (#13 Layer A, PR 2).
+
+    Same pattern the homelab diagram server uses: the server EMITS Mermaid text,
+    the browser renders it. homelab-status owns the re-fix data, so it generates
+    its own diagram. One chain per re-fix: original --didn't hold--> refix --> verdict.
+    """
+    refixes = detect_refixes(repo=repo)[:limit]
+    if not refixes:
+        return 'graph LR\n  empty["✅ No re-fixes found — fixes are holding"]'
+
+    lines = [
+        "graph LR",
+        "  classDef orig fill:#1e3a5f,stroke:#3b82f6,color:#fff;",
+        "  classDef refix fill:#5f1e1e,stroke:#ef4444,color:#fff;",
+        "  classDef verdict fill:#3a2f5f,stroke:#a855f7,color:#fff;",
+    ]
+    for n, rx in enumerate(refixes):
+        o, r = rx["original"], rx["refix"]
+        oid, rid, vid = f"O{n}", f"R{n}", f"V{n}"
+        arrow = "redone same day" if rx["kind"] == "thrash" else f"recurred {rx['days_between']}d later"
+        lines.append(f'  {oid}["🔧 {o["sha"]} ({o["date"]})<br/>{_mermaid_escape(o["subject"])}"]:::orig')
+        lines.append(f'  {rid}["🔧 {r["sha"]} ({r["date"]})<br/>{_mermaid_escape(r["subject"])}"]:::refix')
+        verdict = "thrash — redone immediately" if rx["kind"] == "thrash" else "lesson did not stick"
+        lines.append(f'  {vid}["❌ {rx["repo"]}<br/>{verdict}"]:::verdict')
+        lines.append(f'  {oid} -->|{arrow}| {rid}')
+        lines.append(f'  {rid} --> {vid}')
+    return "\n".join(lines)
+
+
 # ── Enrich gh_commits with agent columns ─────────────────────────────────────
 
 def enrich_commits_with_agents() -> int:
