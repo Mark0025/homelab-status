@@ -38,3 +38,14 @@ async def test_refresh_all_aborts_loudly_without_token(monkeypatch):
 def test_resolve_token_strips_and_prefers_env(monkeypatch):
     monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "  ghp_padded  ")
     assert g._resolve_token() == "ghp_padded"
+
+
+@pytest.mark.asyncio
+async def test_refresh_prs_aborts_loudly_without_token(monkeypatch):
+    """PR ingestion must also fail loud on missing token (#20 class, PR path)."""
+    from homelab_status import timeline as tl
+    _clear_token(monkeypatch)
+    result = await tl.refresh_prs()
+    assert result.get("status") == "error"
+    assert result.get("error") == "no_github_token"
+    assert result.get("prs_saved") == 0
