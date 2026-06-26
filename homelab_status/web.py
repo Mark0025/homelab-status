@@ -25,7 +25,7 @@ from .timeline import (
 from .project_intel import (
     enrich_commits_with_agents, get_agent_stats, get_all_profiles,
     get_project_profile, extract_fix_patterns, detect_refixes, refix_mermaid,
-    refixes_with_plans, search_profiles,
+    refixes_with_plans, code_audit, search_profiles,
     refresh_all_profiles, _profile_running as _intel_running,
 )
 from .services import CATEGORY_LABELS, SERVICES
@@ -309,6 +309,12 @@ async def intel_refixes(repo: str | None = Query(None), limit: int = Query(100))
 async def intel_refixes_mermaid(repo: str | None = Query(None), limit: int = Query(12)):
     """Re-fixes as Mermaid graph syntax (#13 PR 2) — the browser renders it."""
     return JSONResponse({"diagram": refix_mermaid(repo=repo, limit=limit)})
+
+
+@api.get("/api/intel/audit/{owner}/{repo}")
+async def intel_code_audit(owner: str, repo: str):
+    """Code audit (#13): REAL deps + REAL routes from the source, not metadata."""
+    return JSONResponse(await code_audit(owner, repo))
 
 
 @api.post("/api/intel/refresh")
