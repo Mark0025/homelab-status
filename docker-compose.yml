@@ -22,6 +22,31 @@ services:
       - /home/mark/00Myhomelab/MDDPY-MAC-GLOBAL/data-mac/mdops-mac.db:/data/mdops-mac.db:ro
     networks:
       - nginx-network
+    labels:
+      # Opt THIS container in to Watchtower auto-update (#19). The Watchtower
+      # below runs with WATCHTOWER_LABEL_ENABLE=true, so it updates ONLY labeled
+      # containers — it does NOT touch the other ~105 containers on this host.
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # Scoped auto-deploy (#19): pulls a new ghcr :latest and restarts ONLY the
+  # labeled homelab-status container. Polls every 5 min, cleans old images.
+  # NOT host-wide — WATCHTOWER_LABEL_ENABLE keeps the blast radius to 1 container.
+  watchtower-homelab-status:
+    image: containrrr/watchtower:latest
+    container_name: watchtower-homelab-status
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   homelab_status_data:
