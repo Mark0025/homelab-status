@@ -17,6 +17,9 @@
   </div>
 </header>
 
+<!-- Global data-freshness banner (#23): hidden unless data looks stale/broken. -->
+<div id="stale-banner" class="stale-banner" role="status" aria-live="polite" hidden></div>
+
 <div class="tabs">
   <div class="tab active" onclick="showTab('services', this)">Services</div>
   <div class="tab" onclick="showTab('routes', this)">API Routes <span id="route-count-badge" style="color:var(--yellow);font-size:11px"></span></div>
