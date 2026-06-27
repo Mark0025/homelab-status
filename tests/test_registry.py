@@ -26,3 +26,18 @@ def test_extract_readme_purpose_is_prose_not_html():
     purpose, _ = pi._extract_readme_sections(readme)
     assert "<div" not in purpose and "logo.png" not in purpose
     assert "cross-repo analysis" in purpose
+
+
+def test_business_domain_name_first_then_readme():
+    # name = high confidence
+    assert pi.business_domain("pete-db")["domain"] == "Pete (sales job)"
+    assert pi.business_domain("pete-db")["confidence"] == "high"
+    assert pi.business_domain("app.Aireinvestor")["domain"].startswith("aireinvestor")
+    # README rescues a name that says nothing
+    r = pi.business_domain("CALL-CENTER", "Sales call center for Pete intercom")
+    assert r["domain"] == "Pete (sales job)"
+    assert r["by"] == "readme"
+    # honest unknown — never a forced guess
+    u = pi.business_domain("DOG-AGE-CALC", "A calculator for dog age")
+    assert u["domain"] == "custom / unknown"
+    assert u["confidence"] == "low"

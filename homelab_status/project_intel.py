@@ -388,6 +388,42 @@ def _classify_deps(deps: list[str], ecosystem: str) -> list[dict]:
              "does": _LIB_PURPOSE.get(d.lower(), "")} for d in deps]
 
 
+# Which BUSINESS this repo serves — so agents/Mark know an 'employee's' department.
+# Name is the cheapest signal (pete -> Pete sales job); README purpose is the
+# fallback for the ~76% of repos the name doesn't classify. (Verified on 132
+# repos: name covers ~24%, README is needed for the rest.)
+_DOMAIN_NAME_RULES = [
+    ("Pete (sales job)", ["pete"]),
+    ("Twilio / A2P (Pete-adjacent)", ["twilio", "a2p"]),
+    ("aireinvestor (real estate)", ["aire", "airei", "real-estate", "realestate",
+                                     "housebuyer", "leasing", "rental", "rei", "househouse"]),
+    ("AI agents / infra", ["terry", "clawbot", "adam", "agent", "mddpy", "mdops", "autogen", "crew"]),
+    ("homelab / tooling", ["homelab", "diagram", "bash", "tooling", "infrastructure"]),
+]
+_DOMAIN_README_HINTS = {
+    "Pete (sales job)": ["pete", "sales", "skip trace", "skiptrace", "intercom"],
+    "aireinvestor (real estate)": ["real estate", "investor", "property", "wholesale",
+                                    "house", "rental", "lease", "aireinvestor"],
+    "AI agents / infra": ["agent", "llm", "orchestrat", "autonomous", "mcp"],
+}
+
+
+def business_domain(repo: str, purpose: str = "") -> dict:
+    """Classify which business/department a repo serves. Name first (cheap,
+    high-confidence), then README purpose for the rest. Honest 'custom/unknown'
+    when neither signal fires — never a forced guess."""
+    rl = repo.lower()
+    for dom, kws in _DOMAIN_NAME_RULES:
+        if any(k in rl for k in kws):
+            return {"domain": dom, "by": "name", "confidence": "high"}
+    pl = (purpose or "").lower()
+    if pl:
+        for dom, hints in _DOMAIN_README_HINTS.items():
+            if any(h in pl for h in hints):
+                return {"domain": dom, "by": "readme", "confidence": "medium"}
+    return {"domain": "custom / unknown", "by": "none", "confidence": "low"}
+
+
 async def capability_record(owner: str, repo: str) -> dict:
     """One machine-readable capability record an AGENT can route on.
 
@@ -408,9 +444,11 @@ async def capability_record(owner: str, repo: str) -> dict:
     proxies = await npm_proxies()
     friendly = friendly_urls_for(proxies, repo, runtime["containers"] if runtime else [])
 
+    _purpose = (profile.get("purpose") or "")[:300]
     return {
         "repo": repo, "owner": owner,
-        "purpose": (profile.get("purpose") or "")[:300],
+        "purpose": _purpose,
+        "business": business_domain(repo, _purpose),   # which department this employee serves
         "ecosystem": ecosystem,
         "exposes": {
             "routes": audit["routes"],                 # the callable code surface
