@@ -4,18 +4,25 @@ learning (repo) -> runtime (is it deployed/running) must work + fail honestly.""
 from homelab_status import infra
 
 
-def test_runtime_for_repo_exact_and_prefix_match():
+def test_runtime_for_repo_matches_via_name_image_and_multi_container():
     cmap = {
-        "homelab-status": {"health": "running", "url": "http://x:8800"},
-        "pete-db-api": {"health": "healthy", "url": "https://pete-db.x"},
+        "homelab-status": {"health": "running", "image": "ghcr.io/x/homelab-status"},
+        "pete-db-api": {"health": "healthy", "image": "pete-db-api"},
+        # Twilio_tools deploys as MULTIPLE containers whose names differ from the
+        # repo; the link is the compose-project name embedded in the image.
+        "twilio-backend": {"health": "healthy", "image": "twilio-tools-twilio-backend"},
+        "twilio-frontend": {"health": "healthy", "image": "twilio-tools-twilio-frontend"},
     }
-    # exact
+    # exact name
     assert infra.runtime_for_repo(cmap, "homelab-status")["container"] == "homelab-status"
-    # prefix (repo 'pete-db' deploys as container 'pete-db-api')
-    m = infra.runtime_for_repo(cmap, "pete-db")
-    assert m and m["container"] == "pete-db-api"
-    # honest None when nothing matches — NOT a guess
-    assert infra.runtime_for_repo(cmap, "Twilio_tools") is None
+    # repo 'pete-db' -> container 'pete-db-api' (name prefix)
+    assert infra.runtime_for_repo(cmap, "pete-db")["container"] == "pete-db-api"
+    # repo 'Twilio_tools' -> 2 containers, matched via IMAGE (the bug Mark caught)
+    m = infra.runtime_for_repo(cmap, "Twilio_tools")
+    assert m is not None and m["container_count"] == 2
+    assert set(m["containers"]) == {"twilio-backend", "twilio-frontend"}
+    # still honest None when truly nothing matches
+    assert infra.runtime_for_repo(cmap, "NopeRepo") is None
 
 
 def test_container_runtime_parses_diagram_shape(monkeypatch):

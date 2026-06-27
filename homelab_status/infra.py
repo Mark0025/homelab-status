@@ -87,18 +87,32 @@ async def container_runtime() -> dict[str, dict]:
     return out
 
 
-def runtime_for_repo(container_map: dict[str, dict], repo: str) -> dict | None:
-    """Best-effort match a repo name to a running container (exact, then prefix).
+def _norm(s: str) -> str:
+    """Normalize a name for matching: lower-case, and _/spaces -> -."""
+    return (s or "").lower().replace("_", "-").replace(" ", "-")
 
-    The link from repo -> container is fuzzy (a repo may deploy as N containers
-    with prefixed names). We return the closest match or None — honestly None
-    when nothing matches, never a guess presented as fact.
+
+def runtime_for_repo(container_map: dict[str, dict], repo: str) -> dict | None:
+    """Match a repo to its running container(s). A repo deploys as 1..N containers
+    whose NAMES often differ from the repo (Twilio_tools -> twilio-backend,
+    twilio-frontend, twilio-tools-webhook, ...). The reliable link is the
+    compose-project name, embedded in the IMAGE (twilio-tools-twilio-backend).
+    So match the normalized repo against each container's NAME and IMAGE.
+
+    Returns the primary match enriched with ALL matching containers (a repo can
+    run many), or honest None when nothing matches — never a guess.
     """
-    if repo in container_map:
-        return {"container": repo, **container_map[repo]}
-    repo_l = repo.lower()
+    rn = _norm(repo)
+    matches: list[dict] = []
     for name, rt in container_map.items():
-        nl = name.lower()
-        if nl.startswith(repo_l) or repo_l.startswith(nl) or repo_l in nl:
-            return {"container": name, **rt}
-    return None
+        nn = _norm(name)
+        if rn in nn or nn in rn or rn in _norm(rt.get("image", "")):
+            matches.append({"container": name, **rt})
+    if not matches:
+        return None
+    primary = next((m for m in matches if _norm(m["container"]) == rn), None)
+    if not primary:
+        primary = next((m for m in matches if m.get("health") == "healthy"), matches[0])
+    return {**primary,
+            "containers": [m["container"] for m in matches],
+            "container_count": len(matches)}
