@@ -87,6 +87,43 @@ async def container_runtime() -> dict[str, dict]:
     return out
 
 
+async def npm_proxies() -> list[dict]:
+    """The NGINX-Proxy-Manager friendly-URL map (diagram /api/unified/npm).
+
+    Each: {domains:[friendly_url], forward_host, forward_port, ssl, container,
+    project_slug, github_repo, access_list}. This is the FRIENDLY-name layer —
+    portainer.markcarpenter1.com -> portainer:9443 -> Clerk/ACL auth. The app
+    already has access; we just consume it.
+    """
+    data = await _get("/api/unified/npm")
+    if isinstance(data, dict):
+        return data.get("domains", []) or []
+    return []
+
+
+def friendly_urls_for(proxies: list[dict], repo: str, containers: list[str]) -> list[dict]:
+    """All friendly URLs that front this repo's containers. Matches an NPM proxy
+    when its forward_host/container/github_repo ties to the repo or one of its
+    running containers. Returns [{url, forward, ssl, auth}]."""
+    rn = _norm(repo)
+    cset = {_norm(c) for c in containers}
+    out: list[dict] = []
+    for p in proxies:
+        host = _norm(p.get("forward_host", ""))
+        cont = _norm(p.get("container", ""))
+        gh = _norm(p.get("github_repo", ""))
+        if (host in cset or cont in cset or rn in host or rn in cont
+                or (gh and rn in gh)):
+            for dom in (p.get("domains") or []):
+                out.append({
+                    "url": ("https://" if p.get("ssl") else "http://") + dom,
+                    "forward": f"{p.get('forward_host')}:{p.get('forward_port')}",
+                    "ssl": bool(p.get("ssl")),
+                    "auth": p.get("access_list") or ("protected" if p.get("access_list_id") else "public"),
+                })
+    return out
+
+
 def _norm(s: str) -> str:
     """Normalize a name for matching: lower-case, and _/spaces -> -."""
     return (s or "").lower().replace("_", "-").replace(" ", "-")

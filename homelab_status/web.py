@@ -41,7 +41,7 @@ from .journey import (
     elevenlabs_tts, persona_voice_id, load_env_key,
 )
 from .enricher import enrich_all_episodes, enrich_one_episode
-from .infra import runtime_summary, container_runtime, runtime_for_repo
+from .infra import runtime_summary, container_runtime, runtime_for_repo, npm_proxies, friendly_urls_for
 from .logging_config import configure_logging
 
 # Configure logging at import time so the uvicorn container gets a structured,
@@ -326,11 +326,16 @@ async def infra_summary():
 
 @api.get("/api/intel/built/{owner}/{repo}")
 async def intel_built(owner: str, repo: str):
-    """Is it really BUILT? Joins code-audit (what the code declares) with the
-    diagram server's RUNTIME truth (is it deployed/running/live). (#13+#14)."""
+    """The full picture of one repo ('employee'): what the CODE declares
+    (code-audit), whether it's DEPLOYED & running (diagram runtime), and its
+    FRIENDLY URLs + auth (NPM proxy map). Everything the app already knows,
+    joined. (#13 + #14)."""
     audit = await code_audit(owner, repo)
     cmap = await container_runtime()
     runtime = runtime_for_repo(cmap, repo)
+    proxies = await npm_proxies()
+    containers = runtime["containers"] if runtime else []
+    friendly = friendly_urls_for(proxies, repo, containers)
     return JSONResponse({
         "repo": repo,
         "code": {"deps": audit["deps"], "routes": audit["routes"],
@@ -338,6 +343,8 @@ async def intel_built(owner: str, repo: str):
         "runtime": runtime,                     # None if no matching running container
         "deployed": runtime is not None,
         "running": bool(runtime and runtime.get("health") == "healthy"),
+        "container_count": runtime.get("container_count") if runtime else 0,
+        "friendly_urls": friendly,              # the NPM friendly-name layer
     })
 
 

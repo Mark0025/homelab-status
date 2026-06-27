@@ -49,3 +49,24 @@ def test_summary_unavailable_is_honest(monkeypatch):
     import asyncio
     s = asyncio.run(infra.runtime_summary())
     assert s["available"] is False     # says so, doesn't fabricate
+
+
+def test_friendly_urls_for_matches_repo_containers_and_auth():
+    """The NPM friendly-name layer: repo -> friendly URLs + auth (Mark's point)."""
+    proxies = [
+        {"domains": ["twilio-tools.markcarpenter1.com"], "forward_host": "twilio-frontend",
+         "forward_port": 3001, "ssl": True, "container": "twilio-frontend",
+         "access_list_id": 1, "access_list": "Clerk"},
+        {"domains": ["twilio-tools-api.markcarpenter1.com"], "forward_host": "twilio-backend",
+         "forward_port": 8000, "ssl": True, "container": "twilio-backend", "access_list_id": 0},
+        {"domains": ["grafana.markcarpenter1.com"], "forward_host": "grafana",
+         "forward_port": 3000, "ssl": True, "container": "grafana"},
+    ]
+    urls = infra.friendly_urls_for(proxies, "Twilio_tools", ["twilio-frontend", "twilio-backend"])
+    found = {u["url"] for u in urls}
+    assert "https://twilio-tools.markcarpenter1.com" in found
+    assert "https://twilio-tools-api.markcarpenter1.com" in found
+    assert "https://grafana.markcarpenter1.com" not in found       # not this repo
+    # auth surfaced from the access_list (Clerk) vs public
+    clerk = [u for u in urls if u["url"].endswith("twilio-tools.markcarpenter1.com")][0]
+    assert clerk["auth"] == "Clerk"
