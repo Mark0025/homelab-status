@@ -200,7 +200,11 @@ function renderRepoProfiles(profiles) {
           <div style="font-weight:700;font-size:14px">${p.display_name||p.repo}</div>
           <div style="font-size:11px;color:var(--muted)">${p.language||''} · ${p.total_commits||0} commits · ${p.open_issues||0} open issues</div>
         </div>
-        <span style="color:${agentCol};font-size:18px" title="${p.primary_agent}">${agentIcon}</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <button onclick="openEmployeeRecord('${p.owner||'Mark0025'}','${p.repo}')" title="Full employee record"
+            style="font-size:10px;background:var(--surface2);border:1px solid var(--border);color:#94a3b8;border-radius:4px;padding:2px 6px;cursor:pointer">📋 record</button>
+          <span style="color:${agentCol};font-size:18px" title="${p.primary_agent}">${agentIcon}</span>
+        </div>
       </div>
       ${p.purpose ? `<div style="font-size:12px;color:#94a3b8;margin-bottom:6px">${p.purpose.slice(0,200)}</div>` : ''}
       ${p.what_it_does_not_do ? `<div style="font-size:11px;color:#64748b;border-left:2px solid #ef4444;padding-left:8px;margin-bottom:6px">
@@ -220,6 +224,56 @@ function renderRepoProfiles(profiles) {
 
   // Lazy-load plan docs for each repo card
   sorted.forEach(p => loadPlansForRepo(p.repo));
+}
+
+// The "employee record" — everything the app knows about one repo, joined:
+// what it does (code) -> deployed/running -> friendly URLs+auth -> network alignment.
+async function openEmployeeRecord(owner, repo) {
+  const modal = document.getElementById('record-modal');
+  const body = document.getElementById('record-body');
+  document.getElementById('record-title').textContent = `📋 ${repo}`;
+  body.innerHTML = '<div class="loading"><div class="spinner"></div> reading code + runtime + friendly URLs…</div>';
+  modal.style.display = 'flex';
+  try {
+    const d = await fetch(`/api/intel/built/${owner}/${encodeURIComponent(repo)}`).then(r => r.json());
+    const rt = d.runtime;
+    const dep = d.deployed
+      ? `<span style="color:#22c55e">✅ deployed</span> · ${d.running ? '<span style="color:#22c55e">running</span>' : '<span style="color:#f59e0b">unhealthy</span>'} · ${d.container_count} container(s)`
+      : '<span style="color:#64748b">not deployed (no matching container)</span>';
+    const friendly = (d.friendly_urls || []).map(u =>
+      `<div style="font-size:12px;margin:2px 0">
+        ${u.ssl ? '🔒' : '🔓'} <a href="${u.url}" target="_blank" style="color:#3b82f6;text-decoration:none">${u.url}</a>
+        <span style="color:#64748b"> → ${u.forward}</span>
+        <span style="font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:3px;color:${u.auth==='public'?'#f59e0b':'#22c55e'}">${u.auth}</span>
+      </div>`).join('') || '<span style="color:#64748b;font-size:12px">no friendly URLs found</span>';
+    const deps = (d.code.deps || []).map(x => `<span style="font-size:10px;background:var(--surface2);padding:1px 6px;border-radius:3px;margin:1px">${x}</span>`).join(' ') || '—';
+    const routes = (d.code.routes || []).slice(0,12).map(r => `<div style="font-size:11px;color:#94a3b8;font-family:monospace">${r}</div>`).join('') || '<span style="color:#64748b;font-size:11px">none detected</span>';
+
+    body.innerHTML = `
+      <div style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Deployment (runtime)</div>
+        <div style="font-size:13px">${dep}</div>
+        ${rt ? `<div style="font-size:11px;color:#64748b;margin-top:2px">containers: ${(rt.containers||[]).join(', ')}</div>` : ''}
+      </div>
+      <div style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Friendly URLs + auth (NPM)</div>
+        ${friendly}
+      </div>
+      <div style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Real dependencies (from ${d.code.dep_source||'code'})</div>
+        <div>${deps}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Real API routes (from ${(d.code.route_sources||[]).join(', ')||'source'})</div>
+        ${routes}
+      </div>`;
+  } catch (e) {
+    body.innerHTML = `<div style="color:#ef4444">Error: ${e.message}</div>`;
+  }
+}
+
+function closeEmployeeRecord() {
+  document.getElementById('record-modal').style.display = 'none';
 }
 
 async function loadPlansForRepo(repo) {

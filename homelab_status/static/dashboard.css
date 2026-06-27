@@ -164,3 +164,21 @@
     display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
     font-size: 10px; font-weight: 700; background: var(--yellow); color: #1a1d27;
   }
+
+  /* Employee-record modal (#13+#14) — full record of one repo */
+  .record-modal {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.6); align-items: center; justify-content: center;
+  }
+  .record-panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    width: min(680px, 92vw); max-height: 86vh; display: flex; flex-direction: column;
+  }
+  .record-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+  }
+  .record-close {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; width: 28px; height: 28px; cursor: pointer; font-size: 13px;
+  }
