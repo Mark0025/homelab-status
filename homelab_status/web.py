@@ -339,21 +339,31 @@ async def infra_network_alignment():
 
 
 @api.post("/api/registry/analyze")
-async def registry_analyze(limit: int = Query(0), force: bool = Query(False)):
-    """Kick the background LLM analysis runner (#42 'why' layer). Reads each repo's
-    REAL code via Ollama and synthesizes purpose+why for thin-README repos.
-    Resumable — call repeatedly (or on a cron) to chip through all repos."""
+async def registry_analyze(limit: int = Query(0), force: bool = Query(False),
+                           lens: str = Query("baseline")):
+    """Kick the background LLM analysis runner via the claude-lean gateway (#42).
+    APPENDS a dated snapshot per repo under `lens`. Daily cron rotates lenses (#52).
+    Resumable — call repeatedly to chip through all repos."""
     from .repo_llm import analyze_all
-    asyncio.create_task(analyze_all(force=force, limit=limit or 10))
-    return JSONResponse({"status": "llm_analysis_started", "batch": limit or 10})
+    asyncio.create_task(analyze_all(force=force, limit=limit or 10, lens=lens))
+    return JSONResponse({"status": "llm_analysis_started", "batch": limit or 10, "lens": lens})
 
 
 @api.get("/api/registry/analysis/{repo}")
 async def registry_analysis(repo: str):
-    """Read the stored LLM analysis (purpose + why + provenance) for a repo."""
+    """The LATEST analysis snapshot for a repo (AI-built, dated — the UI reads this,
+    so it auto-updates when the next run appends a newer snapshot)."""
     from .repo_llm import get_llm_analysis
     a = get_llm_analysis(repo)
     return JSONResponse(a or {"repo": repo, "analyzed": False})
+
+
+@api.get("/api/registry/analysis/{repo}/history")
+async def registry_analysis_history(repo: str, limit: int = Query(30)):
+    """All snapshots for a repo, newest first — the timeline of perspectives (#52)."""
+    from .repo_llm import get_analysis_history
+    rows = get_analysis_history(repo, limit=limit)
+    return JSONResponse({"repo": repo, "total": len(rows), "snapshots": rows})
 
 
 @api.get("/api/registry")
