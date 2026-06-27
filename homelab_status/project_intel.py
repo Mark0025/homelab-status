@@ -359,6 +359,69 @@ async def _path_exists(
 # repo TRULY uses) and real API routes (what it TRULY exposes). Ground truth for
 # "the plan claimed X — is X actually in the code?". Reuses existing tools only.
 
+# ── Capability registry (#13) — make the codebase ADDRESSABLE by agents ──────
+# The keystone: a machine-readable record per repo so an AI agent can route work
+# ("who exposes /skiptrace? -> pete-db, call it here") instead of every agent
+# rebuilding everything. Joins purpose + exposed surface + deps + deployment.
+# What each well-known library DOES (so 'how libraries help/hurt' is legible).
+
+_LIB_PURPOSE = {
+    "fastapi": "HTTP API framework", "flask": "HTTP API framework",
+    "uvicorn": "ASGI server", "httpx": "async HTTP client", "requests": "HTTP client",
+    "pydantic": "data validation/models", "sqlalchemy": "ORM/database",
+    "langchain": "LLM orchestration", "langgraph": "agent graph orchestration",
+    "langchain-openai": "OpenAI via LangChain", "openai": "OpenAI API",
+    "anthropic": "Anthropic/Claude API", "mcp": "Model Context Protocol",
+    "playwright": "browser automation", "beautifulsoup4": "HTML parsing",
+    "twilio": "SMS/voice telephony", "stripe": "payments", "clerk": "auth",
+    "next": "React framework", "react": "UI library", "tailwindcss": "CSS framework",
+    "prisma": "ORM/database", "redis": "cache/queue", "celery": "task queue",
+    "pandas": "dataframes/analytics", "plotly": "charts", "loguru": "logging",
+    "typer": "CLI framework", "click": "CLI framework", "rich": "terminal UI",
+    "elevenlabs": "text-to-speech", "nltk": "NLP", "google-api-python-client": "Google APIs",
+}
+
+
+def _classify_deps(deps: list[str], ecosystem: str) -> list[dict]:
+    """Label each dep with its ecosystem + what it does (when known)."""
+    return [{"name": d, "ecosystem": ecosystem,
+             "does": _LIB_PURPOSE.get(d.lower(), "")} for d in deps]
+
+
+async def capability_record(owner: str, repo: str) -> dict:
+    """One machine-readable capability record an AGENT can route on.
+
+    Answers: what does this repo DO, what does it EXPOSE (callable surface +
+    friendly URL + auth), what is it BUILT with (deps + ecosystem + purpose),
+    and is it CALLABLE right now. The unit of the capability registry.
+    """
+    from .infra import container_runtime, runtime_for_repo, npm_proxies, friendly_urls_for
+
+    audit = await code_audit(owner, repo)
+    ecosystem = ("python" if audit["dep_source"] and "pyproject" in audit["dep_source"]
+                 or (audit["dep_source"] and "requirements" in audit["dep_source"])
+                 else "npm" if audit["dep_source"] == "package.json"
+                 else "mixed" if audit["dep_source"] else "unknown")
+    profile = get_project_profile(repo, owner) or {}
+    cmap = await container_runtime()
+    runtime = runtime_for_repo(cmap, repo)
+    proxies = await npm_proxies()
+    friendly = friendly_urls_for(proxies, repo, runtime["containers"] if runtime else [])
+
+    return {
+        "repo": repo, "owner": owner,
+        "purpose": (profile.get("purpose") or "")[:300],
+        "ecosystem": ecosystem,
+        "exposes": {
+            "routes": audit["routes"],                 # the callable code surface
+            "friendly_urls": friendly,                 # how an agent actually calls it
+        },
+        "built_with": _classify_deps(audit["deps"], ecosystem),
+        "callable_now": bool(runtime and runtime.get("health") == "healthy"),
+        "deployed": runtime is not None,
+    }
+
+
 def _parse_python_deps(text: str) -> list[str]:
     """Real Python deps. For pyproject, ONLY the dependencies arrays (not TOML
     keys); for requirements.txt, the package lines."""
@@ -463,10 +526,24 @@ _PURPOSE_HEADERS_RE = re.compile(
 )
 
 
+def _clean_readme_prose(text: str) -> str:
+    """Strip the noise modern READMEs open with — HTML, badges, images, links —
+    so 'purpose' is real prose, not '<picture><source...>'. (Fixes the broken
+    purpose that scraped README markup.)"""
+    t = re.sub(r"<[^>]+>", " ", text)                       # HTML tags
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)             # ![img](...)
+    t = re.sub(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)", " ", t)  # badge links
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)          # [text](url) -> text
+    t = re.sub(r"https?://\S+", " ", t)                     # bare URLs
+    t = re.sub(r"[`*_#>|-]{2,}", " ", t)                    # md rule/emphasis runs
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 def _extract_readme_sections(readme: str) -> tuple[str, str]:
     """
-    Return (purpose, limitations) extracted from README markdown.
-    Heuristic: look for recognised section headers; fall back to first 500 chars.
+    Return (purpose, limitations) extracted from README markdown, cleaned of
+    HTML/badges/images so the purpose is real prose.
     """
     purpose = ""
     limitations = ""
@@ -475,19 +552,18 @@ def _extract_readme_sections(readme: str) -> tuple[str, str]:
     if purpose_match:
         start = purpose_match.end()
         next_header = re.search(r'^#', readme[start:], re.MULTILINE)
-        chunk = readme[start : start + (next_header.start() if next_header else 600)].strip()
-        purpose = chunk[:500]
-    else:
-        # Strip leading headings; take first 500 non-empty chars
-        stripped = re.sub(r'^#.*$', '', readme, flags=re.MULTILINE).strip()
-        purpose = stripped[:500]
+        chunk = readme[start : start + (next_header.start() if next_header else 600)]
+        purpose = _clean_readme_prose(chunk)[:500]
+    if not purpose:
+        # fallback: first real prose sentence(s) after stripping all the noise
+        purpose = _clean_readme_prose(re.sub(r'^#.*$', '', readme, flags=re.MULTILINE))[:500]
 
     limitation_match = _LIMITATION_HEADERS_RE.search(readme)
     if limitation_match:
         start = limitation_match.end()
         next_header = re.search(r'^#', readme[start:], re.MULTILINE)
-        chunk = readme[start : start + (next_header.start() if next_header else 600)].strip()
-        limitations = chunk[:400]
+        chunk = readme[start : start + (next_header.start() if next_header else 600)]
+        limitations = _clean_readme_prose(chunk)[:400]
 
     return purpose, limitations
 
