@@ -23,8 +23,14 @@ from .db import _conn, init_db
 from .project_intel import code_audit, _fetch_file_content
 from .git_history import GITHUB_HEADERS
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "codellama:13b")
+# Mark's own gateway: go-local-aibot (container `claude-http`) — one
+# OpenAI-compatible API wrapping the host's real `claude` CLI (Claude Max) and,
+# optionally, local models by `local:` prefix. 'claude-fast:haiku' = the "lean
+# Claude" Mark pointed at. Reachable by name on the homelab network. This REPLACES
+# the slow/flaky local-Ollama approach — consume the gateway Mark built for exactly
+# this, don't reinvent.
+CLAUDE_HTTP_URL = os.environ.get("CLAUDE_HTTP_URL", "http://claude-http:8765")
+ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-fast:haiku")
 
 
 def _init_llm_table() -> None:
@@ -44,16 +50,19 @@ def _init_llm_table() -> None:
         """)
 
 
-def _ask_ollama(prompt: str) -> str | None:
+def _ask_claude_http(prompt: str) -> str | None:
+    """Ask Mark's claude-http gateway (OpenAI-compatible). Default model is the
+    'lean Claude' (claude-fast:haiku) — fast + real Claude quality."""
     try:
-        r = httpx.post(f"{OLLAMA_URL}/api/generate",
-                       json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-                       timeout=120)
+        r = httpx.post(f"{CLAUDE_HTTP_URL}/v1/chat/completions",
+                       json={"model": ANALYSIS_MODEL,
+                             "messages": [{"role": "user", "content": prompt}]},
+                       timeout=90)
         if r.status_code == 200:
-            return (r.json().get("response") or "").strip()
-        logger.warning(f"ollama {r.status_code}")
+            return (r.json()["choices"][0]["message"]["content"] or "").strip()
+        logger.warning(f"claude-http {r.status_code}")
     except Exception as e:
-        logger.warning(f"ollama unreachable: {e}")
+        logger.warning(f"claude-http unreachable: {e}")
     return None
 
 
@@ -97,13 +106,13 @@ async def analyze_repo(owner: str, repo: str) -> dict:
         "If the evidence is too thin to tell, say so honestly. Do NOT invent features.\n\n"
         f"EVIDENCE:\n{evidence}\n\nJSON:"
     )
-    raw = _ask_ollama(prompt)
-    model = OLLAMA_MODEL
+    raw = _ask_claude_http(prompt)
+    model = ANALYSIS_MODEL
     if not raw:
         raw = _ask_openrouter(prompt)
         model = "anthropic/claude-haiku-4-5"
     if not raw:
-        return {"repo": repo, "error": "no LLM available (ollama + openrouter both failed)"}
+        return {"repo": repo, "error": "no LLM available (claude-http + openrouter both failed)"}
 
     purpose, why = _parse_llm_json(raw)
     from datetime import datetime
