@@ -41,6 +41,7 @@ from .journey import (
     elevenlabs_tts, persona_voice_id, load_env_key,
 )
 from .enricher import enrich_all_episodes, enrich_one_episode
+from .infra import runtime_summary, container_runtime, runtime_for_repo
 from .logging_config import configure_logging
 
 # Configure logging at import time so the uvicorn container gets a structured,
@@ -315,6 +316,29 @@ async def intel_refixes_mermaid(repo: str | None = Query(None), limit: int = Que
 async def intel_code_audit(owner: str, repo: str):
     """Code audit (#13): REAL deps + REAL routes from the source, not metadata."""
     return JSONResponse(await code_audit(owner, repo))
+
+
+@api.get("/api/infra/summary")
+async def infra_summary():
+    """The diagram server's live homelab overview, consumed (#14)."""
+    return JSONResponse(await runtime_summary())
+
+
+@api.get("/api/intel/built/{owner}/{repo}")
+async def intel_built(owner: str, repo: str):
+    """Is it really BUILT? Joins code-audit (what the code declares) with the
+    diagram server's RUNTIME truth (is it deployed/running/live). (#13+#14)."""
+    audit = await code_audit(owner, repo)
+    cmap = await container_runtime()
+    runtime = runtime_for_repo(cmap, repo)
+    return JSONResponse({
+        "repo": repo,
+        "code": {"deps": audit["deps"], "routes": audit["routes"],
+                 "dep_source": audit["dep_source"], "route_sources": audit["route_sources"]},
+        "runtime": runtime,                     # None if no matching running container
+        "deployed": runtime is not None,
+        "running": bool(runtime and runtime.get("health") == "healthy"),
+    })
 
 
 @api.post("/api/intel/refresh")
