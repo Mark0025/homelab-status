@@ -25,7 +25,7 @@ from .timeline import (
 from .project_intel import (
     enrich_commits_with_agents, get_agent_stats, get_all_profiles,
     get_project_profile, extract_fix_patterns, detect_refixes, refix_mermaid,
-    refixes_with_plans, code_audit, capability_record, search_profiles,
+    refixes_with_plans, code_audit, capability_record, registry_search, search_profiles,
     refresh_all_profiles, _profile_running as _intel_running,
 )
 from .services import CATEGORY_LABELS, SERVICES
@@ -336,6 +336,21 @@ async def infra_network_alignment():
     bad = [r for r in rows if r["status"] == "MISALIGNED"]
     return JSONResponse({"total": len(rows), "misaligned": len(bad),
                          "alignment": rows})
+
+
+@api.get("/api/registry")
+async def registry_directory(
+    q: str = Query("", description="free-text: what it does / uses / domain"),
+    domain: str = Query(""), stack: str = Query(""),
+    deployed: bool = Query(False), limit: int = Query(30),
+):
+    """The capability DIRECTORY an agent queries to ROUTE work:
+    'who does X / uses Y / serves which business / is callable right now?'.
+    Returns lightweight routing cards; drill into /api/registry/{owner}/{repo}."""
+    hits = registry_search(query=q, domain=domain, stack=stack,
+                           deployed_only=deployed, limit=limit)
+    return JSONResponse({"query": q, "domain": domain, "stack": stack,
+                         "total": len(hits), "results": hits})
 
 
 @api.get("/api/registry/{owner}/{repo}")

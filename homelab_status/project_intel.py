@@ -424,6 +424,56 @@ def business_domain(repo: str, purpose: str = "") -> dict:
     return {"domain": "custom / unknown", "by": "none", "confidence": "low"}
 
 
+def registry_search(query: str = "", domain: str = "", stack: str = "",
+                    deployed_only: bool = False, limit: int = 30) -> list[dict]:
+    """Fleet-wide capability directory search — the thing an AGENT queries to
+    ROUTE work: 'who does X / uses Y / serves which business / is callable?'.
+
+    Searches the fast stored profiles (not the expensive per-repo capability_record),
+    so it scales across all 133 repos. Each hit is a lightweight routing card; the
+    agent then drills into /api/registry/{owner}/{repo} for the full callable surface.
+    """
+    q = (query or "").lower()
+    dom = (domain or "").lower()
+    stk = (stack or "").lower()
+    results: list[dict] = []
+    for p in get_all_profiles(active_only=False):
+        if p.get("is_fork"):
+            continue  # don't route work to a cloned upstream repo
+        purpose = p.get("purpose") or ""
+        ts = p.get("tech_stack") or []
+        stack_list = ts if isinstance(ts, list) else [
+            t.strip().strip('"') for t in str(ts).strip("[]").split(",") if t.strip()]
+        techs = " ".join(stack_list).lower()
+        biz = business_domain(p["repo"], purpose)
+        hay = f"{p['repo']} {p.get('description','')} {purpose} {techs} {biz['domain']}".lower()
+        if q and q not in hay:
+            continue
+        if dom and dom not in biz["domain"].lower():
+            continue
+        if stk and stk not in techs:
+            continue
+        deployed = bool(p.get("public_url"))
+        if deployed_only and not deployed:
+            continue
+        # crude relevance: exact repo-name hit > purpose hit > anything
+        score = (3 if q and q in p["repo"].lower() else 0) + (1 if q and q in purpose.lower() else 0)
+        results.append({
+            "repo": p["repo"], "owner": p.get("owner", "Mark0025"),
+            "purpose": purpose[:160],
+            "business": biz["domain"],
+            "stack": stack_list[:6],
+            "public_url": p.get("public_url") or "",
+            "deployed": deployed,
+            "callable_via": f"/api/registry/{p.get('owner','Mark0025')}/{p['repo']}",
+            "_score": score,
+        })
+    results.sort(key=lambda r: (-r["_score"], not r["deployed"], r["repo"]))
+    for r in results:
+        r.pop("_score", None)
+    return results[:limit]
+
+
 async def capability_record(owner: str, repo: str) -> dict:
     """One machine-readable capability record an AGENT can route on.
 

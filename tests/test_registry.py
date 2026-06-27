@@ -41,3 +41,31 @@ def test_business_domain_name_first_then_readme():
     u = pi.business_domain("DOG-AGE-CALC", "A calculator for dog age")
     assert u["domain"] == "custom / unknown"
     assert u["confidence"] == "low"
+
+
+def test_registry_search_routes_by_domain_stack_and_excludes_forks(monkeypatch):
+    """The directory an agent queries to ROUTE work."""
+    profiles = [
+        {"repo": "pete-db", "owner": "Mark0025", "purpose": "skip trace + db",
+         "tech_stack": ["Python", "FastAPI"], "public_url": "https://pete-db.x", "is_fork": 0},
+        {"repo": "aireinvestor", "owner": "Mark0025", "purpose": "real estate site",
+         "tech_stack": ["Next.js"], "public_url": "https://theairealestateinvestor.com", "is_fork": 0},
+        {"repo": "browser-use", "owner": "Mark0025", "purpose": "browser automation",
+         "tech_stack": ["Python"], "public_url": "", "is_fork": 1},   # FORK -> excluded
+    ]
+    monkeypatch.setattr(pi, "get_all_profiles", lambda active_only=False: profiles)
+
+    # domain routing
+    pete = pi.registry_search(domain="pete")
+    assert any(r["repo"] == "pete-db" for r in pete)
+    # stack routing
+    fa = pi.registry_search(stack="fastapi")
+    assert [r["repo"] for r in fa] == ["pete-db"]
+    # deployed_only
+    dep = pi.registry_search(domain="aireinvestor", deployed_only=True)
+    assert dep and dep[0]["public_url"].startswith("https://theaire")
+    # forks never routed to
+    allr = pi.registry_search()
+    assert "browser-use" not in {r["repo"] for r in allr}
+    # each hit carries the callable drill-down path
+    assert all(r["callable_via"].startswith("/api/registry/") for r in allr)
