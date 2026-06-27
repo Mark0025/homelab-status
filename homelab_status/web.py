@@ -25,7 +25,7 @@ from .timeline import (
 from .project_intel import (
     enrich_commits_with_agents, get_agent_stats, get_all_profiles,
     get_project_profile, extract_fix_patterns, detect_refixes, refix_mermaid,
-    refixes_with_plans, code_audit, search_profiles,
+    refixes_with_plans, code_audit, capability_record, search_profiles,
     refresh_all_profiles, _profile_running as _intel_running,
 )
 from .services import CATEGORY_LABELS, SERVICES
@@ -336,6 +336,13 @@ async def infra_network_alignment():
     bad = [r for r in rows if r["status"] == "MISALIGNED"]
     return JSONResponse({"total": len(rows), "misaligned": len(bad),
                          "alignment": rows})
+
+
+@api.get("/api/registry/{owner}/{repo}")
+async def registry_record(owner: str, repo: str):
+    """Capability record (#13 keystone): one machine-readable record an AGENT
+    routes on — what this repo does, exposes, is built with, and is it callable."""
+    return JSONResponse(await capability_record(owner, repo))
 
 
 @api.get("/api/intel/built/{owner}/{repo}")
