@@ -124,6 +124,57 @@ def friendly_urls_for(proxies: list[dict], repo: str, containers: list[str]) -> 
     return out
 
 
+def _container_networks() -> dict[str, set[str]]:
+    """container_name -> {networks} from the app's own network_topology table
+    (populated by save_network_topology). This is how the app already knows
+    docker networking — no docker socket needed."""
+    from .db import get_topology
+    out: dict[str, set[str]] = {}
+    for row in get_topology():
+        c = row.get("container_name")
+        n = row.get("network_name")
+        if c and n:
+            out.setdefault(c, set()).add(n)
+    return out
+
+
+async def network_alignment(proxy_host: str = "nginx-proxy-manager") -> list[dict]:
+    """The configuration-correctness check Mark actually uses: for each NPM proxy,
+    does its forward_host share a docker network with NPM? If NOT, the proxy can't
+    reach it ('Connection failed') even when the container is healthy — a real,
+    hard-to-debug misalignment.
+
+    Consumes existing data: npm_proxies() + the network_topology table. The proxy
+    must be reachable; we compute set-intersection of networks (validated math —
+    a flaky shell grep gave FALSE misalignments; intersection is correct).
+    Honest caveat: topology comes from the (last-known) registry, not live docker.
+    """
+    nets = _container_networks()
+    proxy_nets = nets.get(proxy_host, set())
+    proxies = await npm_proxies()
+    out: list[dict] = []
+    for p in proxies:
+        fh = p.get("forward_host", "")
+        fh_nets = nets.get(fh, set())
+        shared = proxy_nets & fh_nets if proxy_nets and fh_nets else set()
+        # unknown if we have no topology for the forward_host (e.g. localhost, IPs)
+        if not fh_nets:
+            status = "unknown"
+        elif shared:
+            status = "aligned"
+        else:
+            status = "MISALIGNED"
+        out.append({
+            "domain": (p.get("domains") or ["?"])[0],
+            "forward_host": fh,
+            "forward_port": p.get("forward_port"),
+            "shared_networks": sorted(shared),
+            "forward_networks": sorted(fh_nets),
+            "status": status,
+        })
+    return out
+
+
 def _norm(s: str) -> str:
     """Normalize a name for matching: lower-case, and _/spaces -> -."""
     return (s or "").lower().replace("_", "-").replace(" ", "-")

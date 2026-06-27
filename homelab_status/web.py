@@ -41,7 +41,10 @@ from .journey import (
     elevenlabs_tts, persona_voice_id, load_env_key,
 )
 from .enricher import enrich_all_episodes, enrich_one_episode
-from .infra import runtime_summary, container_runtime, runtime_for_repo, npm_proxies, friendly_urls_for
+from .infra import (
+    runtime_summary, container_runtime, runtime_for_repo,
+    npm_proxies, friendly_urls_for, network_alignment,
+)
 from .logging_config import configure_logging
 
 # Configure logging at import time so the uvicorn container gets a structured,
@@ -322,6 +325,17 @@ async def intel_code_audit(owner: str, repo: str):
 async def infra_summary():
     """The diagram server's live homelab overview, consumed (#14)."""
     return JSONResponse(await runtime_summary())
+
+
+@api.get("/api/infra/network-alignment")
+async def infra_network_alignment():
+    """Config-correctness: for each NPM friendly URL, is its forward_host on a
+    network the proxy can reach? MISALIGNED = 'Connection failed' despite a
+    healthy container. (Mark's docker-networking alignment model.)"""
+    rows = await network_alignment()
+    bad = [r for r in rows if r["status"] == "MISALIGNED"]
+    return JSONResponse({"total": len(rows), "misaligned": len(bad),
+                         "alignment": rows})
 
 
 @api.get("/api/intel/built/{owner}/{repo}")

@@ -70,3 +70,28 @@ def test_friendly_urls_for_matches_repo_containers_and_auth():
     # auth surfaced from the access_list (Clerk) vs public
     clerk = [u for u in urls if u["url"].endswith("twilio-tools.markcarpenter1.com")][0]
     assert clerk["auth"] == "Clerk"
+
+
+def test_network_alignment_aligned_misaligned_unknown(monkeypatch):
+    """Mark's docker-networking model: NPM forward_host must share a network with
+    the proxy, or it's MISALIGNED ('Connection failed' despite healthy container).
+    Must NOT false-flag (the shell-grep bug); uses set intersection."""
+    monkeypatch.setattr(infra, "_container_networks", lambda: {
+        "nginx-proxy-manager": {"nginx-network", "pete-network"},
+        "twilio-backend": {"nginx-network", "twilio-network"},   # shares nginx -> aligned
+        "lonely": {"isolated-network"},                          # no overlap -> MISALIGNED
+    })
+
+    async def fake_npm():
+        return [
+            {"domains": ["api.x"], "forward_host": "twilio-backend", "forward_port": 8000},
+            {"domains": ["lonely.x"], "forward_host": "lonely", "forward_port": 9000},
+            {"domains": ["ext.x"], "forward_host": "localhost", "forward_port": 8000},  # unknown
+        ]
+    monkeypatch.setattr(infra, "npm_proxies", fake_npm)
+
+    import asyncio
+    rows = {r["forward_host"]: r["status"] for r in asyncio.run(infra.network_alignment())}
+    assert rows["twilio-backend"] == "aligned"
+    assert rows["lonely"] == "MISALIGNED"
+    assert rows["localhost"] == "unknown"        # not a container — honest, not 'broken'
