@@ -201,6 +201,41 @@ def get_llm_analysis(repo: str) -> dict | None:
     return dict(row) if row else None
 
 
+def bootstrap_from_report(report_path: str = "docs/REPO-ANALYSIS.md", owner: str = "Mark0025") -> dict:
+    """One-time: parse the generated REPO-ANALYSIS.md into the snapshot table so the
+    UI/API have data immediately (the report was written by a standalone script).
+    Each parsed repo becomes a dated 'baseline' snapshot. Idempotent-ish: appends
+    only repos that have no snapshot yet (so re-running doesn't duplicate)."""
+    import os, re
+    from datetime import datetime
+    _init_llm_table()
+    if not os.path.exists(report_path):
+        return {"error": f"{report_path} not found", "imported": 0}
+    text = open(report_path).read()
+    # report-build date from the header (the '> Generated YYYY-MM-DD' line)
+    dm = re.search(r"Generated (\d{4}-\d{2}-\d{2})", text)
+    built = (dm.group(1) + "T00:00:00") if dm else datetime.now().isoformat()
+    # entries: ### <repo>  `GRADE` · <maturity> · ... \n **What:** ... \n\n **Why:** ...
+    entries = re.findall(
+        r"^### (\S+)\s+`([^`]+)`\s*·\s*(\w+).*?\n\*\*What:\*\*\s*(.+?)\n.*?\*\*Why:\*\*\s*(.+?)\n",
+        text, re.S | re.M)
+    with _conn() as conn:
+        have = {r["repo"] for r in conn.execute(
+            "SELECT DISTINCT repo FROM repo_llm_analysis").fetchall()}
+        imported = 0
+        for repo, grade, maturity, what, why in entries:
+            if repo in have:
+                continue
+            conn.execute(
+                """INSERT INTO repo_llm_analysis
+                   (repo, owner, llm_purpose, llm_why, lens, grade, maturity, source, model, evidence, analyzed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (repo, owner, what.strip()[:300], why.strip()[:300], "baseline",
+                 grade.strip(), maturity.strip(), "llm", "report-import", "from REPO-ANALYSIS.md", built))
+            imported += 1
+    return {"imported": imported, "parsed": len(entries), "built": built}
+
+
 def get_analysis_history(repo: str, limit: int = 30) -> list[dict]:
     """All snapshots for a repo, newest first — the timeline of perspectives (#52)."""
     _init_llm_table()
