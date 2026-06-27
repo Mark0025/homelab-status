@@ -349,6 +349,14 @@ async def registry_analyze(limit: int = Query(0), force: bool = Query(False),
     return JSONResponse({"status": "llm_analysis_started", "batch": limit or 10, "lens": lens})
 
 
+@api.post("/api/registry/bootstrap")
+async def registry_bootstrap():
+    """One-time: load docs/REPO-ANALYSIS.md into the snapshot table so the UI has
+    data immediately (until the daily run takes over)."""
+    from .repo_llm import bootstrap_from_report
+    return JSONResponse(bootstrap_from_report())
+
+
 @api.get("/api/registry/analysis/{repo}")
 async def registry_analysis(repo: str):
     """The LATEST analysis snapshot for a repo (AI-built, dated — the UI reads this,

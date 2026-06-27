@@ -113,3 +113,30 @@ def test_migration_from_old_overwrite_schema(monkeypatch, tmp_path):
     a = r.get_llm_analysis("old-repo")
     assert a is not None and a["llm_purpose"] == "op"   # old row preserved
     assert a["lens"] == "baseline"                       # new column defaulted
+
+
+def test_bootstrap_parses_report(monkeypatch, tmp_path):
+    """Bootstrap loads REPO-ANALYSIS.md entries into the snapshot table."""
+    import sqlite3, contextlib
+    from homelab_status import repo_llm as r
+    report = tmp_path / "rep.md"
+    report.write_text(
+        "# Repo Analysis\n> Generated 2026-06-27\n\n"
+        "### myapp  `B` · working · 10 commits\n"
+        "**What:** Does a thing.\n\n**Why:** Because reasons.\n\n"
+        "### empty-one  `F` · empty · 1 commits\n"
+        "**What:** Cannot be determined.\n\n**Why:** No evidence.\n")
+    db = tmp_path / "b.db"
+    @contextlib.contextmanager
+    def fake_conn():
+        c = sqlite3.connect(db); c.row_factory = sqlite3.Row
+        try:
+            yield c; c.commit()
+        finally:
+            c.close()
+    monkeypatch.setattr(r, "_conn", fake_conn)
+    monkeypatch.setattr(r, "init_db", lambda: None)
+    res = r.bootstrap_from_report(str(report))
+    assert res["imported"] == 2
+    a = r.get_llm_analysis("myapp")
+    assert a["grade"] == "B" and a["maturity"] == "working" and "Does a thing" in a["llm_purpose"]

@@ -214,6 +214,7 @@ function renderRepoProfiles(profiles) {
       ${connects.length ? `<div style="font-size:10px;color:#64748b">Talks to: ${connects.join(', ')}</div>` : ''}
       ${p.public_url ? `<div style="margin-top:6px"><a href="${p.public_url}" target="_blank" style="font-size:11px;color:#3b82f6;text-decoration:none">${p.public_url}</a></div>` : ''}
       ${p.claude_model ? `<div style="font-size:10px;color:#a855f7;margin-top:4px">🤖 ${p.claude_model}</div>` : ''}
+      <div id="ai-for-${p.repo}" style="margin-top:8px"></div>
       <div id="plans-for-${p.repo}" style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
         <span style="font-size:10px;color:var(--muted)">Loading plans…</span>
       </div>
@@ -222,8 +223,31 @@ function renderRepoProfiles(profiles) {
   html += '</div>';
   document.getElementById('intel-content').innerHTML = html;
 
-  // Lazy-load plan docs for each repo card
-  sorted.forEach(p => loadPlansForRepo(p.repo));
+  // Lazy-load plan docs + AI analysis for each repo card
+  sorted.forEach(p => { loadPlansForRepo(p.repo); loadAnalysisForRepo(p.repo); });
+}
+
+// #52: read the LATEST AI analysis snapshot from the API and show it on the card,
+// clearly flagged AI-built + dated. Auto-updates when the daily run appends a
+// newer snapshot — the UI never touches REPO-ANALYSIS.md, only the API.
+async function loadAnalysisForRepo(repo) {
+  const el = document.getElementById('ai-for-' + repo);
+  if (!el) return;
+  const a = await fetch('/api/registry/analysis/' + encodeURIComponent(repo))
+    .then(r => r.json()).catch(() => null);
+  if (!a || a.analyzed === false || !a.llm_purpose) { el.innerHTML = ''; return; }
+  const gradeColor = {A:'#22c55e','B':'#84cc16',C:'#f59e0b',D:'#f97316',F:'#ef4444'}[(a.grade||'')[0]] || '#64748b';
+  const when = a.analyzed_at ? new Date(a.analyzed_at).toLocaleDateString() : '';
+  el.innerHTML = `
+    <div style="background:rgba(168,85,247,0.06);border:1px solid rgba(168,85,247,0.25);border-radius:6px;padding:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-size:10px;color:#a855f7">🤖 AI analysis${a.lens && a.lens!=='baseline' ? ' · '+a.lens : ''}</span>
+        ${a.grade ? `<span style="font-size:11px;font-weight:700;color:${gradeColor}">${a.grade}${a.maturity?' · '+a.maturity:''}</span>` : ''}
+      </div>
+      <div style="font-size:11px;color:#cbd5e1">${(a.llm_purpose||'').slice(0,180)}</div>
+      ${a.llm_why ? `<div style="font-size:10px;color:#64748b;margin-top:3px"><b>Why:</b> ${a.llm_why.slice(0,140)}</div>` : ''}
+      <div style="font-size:9px;color:#475569;margin-top:4px">AI-built (may be off) · ${a.model||''} · ${when}</div>
+    </div>`;
 }
 
 // The "employee record" — everything the app knows about one repo, joined:
