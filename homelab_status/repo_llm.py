@@ -30,7 +30,11 @@ from .git_history import GITHUB_HEADERS
 # the slow/flaky local-Ollama approach — consume the gateway Mark built for exactly
 # this, don't reinvent.
 CLAUDE_HTTP_URL = os.environ.get("CLAUDE_HTTP_URL", "http://claude-http:8765")
-ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-fast:haiku")
+# Gateway requires a bearer token (read from env so it's never committed).
+CLAUDE_HTTP_TOKEN = os.environ.get("CLAUDE_HTTP_TOKEN", "")
+# claude-fast:sonnet measured ~2s and is the sane unattended-cron choice
+# (the full-PAI path is ~24s — too slow for a cron). Default to it.
+ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-fast:sonnet")
 
 
 def _init_llm_table() -> None:
@@ -53,8 +57,10 @@ def _init_llm_table() -> None:
 def _ask_claude_http(prompt: str) -> str | None:
     """Ask Mark's claude-http gateway (OpenAI-compatible). Default model is the
     'lean Claude' (claude-fast:haiku) — fast + real Claude quality."""
+    headers = {"Authorization": f"Bearer {CLAUDE_HTTP_TOKEN}"} if CLAUDE_HTTP_TOKEN else {}
     try:
         r = httpx.post(f"{CLAUDE_HTTP_URL}/v1/chat/completions",
+                       headers=headers,
                        json={"model": ANALYSIS_MODEL,
                              "messages": [{"role": "user", "content": prompt}]},
                        timeout=90)
