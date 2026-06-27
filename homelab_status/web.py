@@ -338,6 +338,24 @@ async def infra_network_alignment():
                          "alignment": rows})
 
 
+@api.post("/api/registry/analyze")
+async def registry_analyze(limit: int = Query(0), force: bool = Query(False)):
+    """Kick the background LLM analysis runner (#42 'why' layer). Reads each repo's
+    REAL code via Ollama and synthesizes purpose+why for thin-README repos.
+    Resumable — call repeatedly (or on a cron) to chip through all repos."""
+    from .repo_llm import analyze_all
+    asyncio.create_task(analyze_all(force=force, limit=limit or 10))
+    return JSONResponse({"status": "llm_analysis_started", "batch": limit or 10})
+
+
+@api.get("/api/registry/analysis/{repo}")
+async def registry_analysis(repo: str):
+    """Read the stored LLM analysis (purpose + why + provenance) for a repo."""
+    from .repo_llm import get_llm_analysis
+    a = get_llm_analysis(repo)
+    return JSONResponse(a or {"repo": repo, "analyzed": False})
+
+
 @api.get("/api/registry")
 async def registry_directory(
     q: str = Query("", description="free-text: what it does / uses / domain"),
